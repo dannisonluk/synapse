@@ -1,0 +1,18 @@
+[tool.poetry]
+name = "synapse-server"
+version = "0.1.0"
+description = "Synapse Agent & Compute Backend"
+authors = ["Synapse Team"]
+
+[tool.poetry.dependencies]
+python = "^3.11"
+fastapi = "^0.110.0"
+uvicorn = {extras = ["standard"], version = "^0.28.0"}
+langgraph = "^0.0.30"
+langchain-openai = "^0.1.0"
+pydantic = "^2.6.0"
+python-dotenv = "^1.0.1"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
