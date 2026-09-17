@@ -11,7 +11,7 @@ export function generateSqlFromConfig(
 
 	switch (nodeType) {
 		case "INPUT_DUCKDB": {
-			const targetTable = config.tableName || "transactions";
+			const targetTable = config.tableName || "raw_data";
 			return `CREATE TEMP TABLE ${nodeId} AS SELECT * FROM ${targetTable};`;
 		}
 
@@ -22,6 +22,12 @@ export function generateSqlFromConfig(
 			return `CREATE TEMP TABLE ${nodeId} AS SELECT * FROM ${sourceTable} WHERE ${field} ${op} ${val};`;
 		}
 
+		case "FORMULA": {
+			const outputCol = config.outputColumn || "amount_taxed";
+			const expr = config.expression || "amount * 1.1";
+			return `CREATE TEMP TABLE ${nodeId} AS SELECT *, (${expr}) AS ${outputCol} FROM ${sourceTable};`;
+		}
+
 		case "SUMMARIZE": {
 			const groupBy = config.groupBy || "year";
 			const func = config.func || "SUM";
@@ -30,11 +36,13 @@ export function generateSqlFromConfig(
 		}
 
 		case "JOIN": {
-			const leftTable = upstreamNodeIds[0] || "table_a";
-			const rightTable = upstreamNodeIds[1] || "table_b";
+			const leftTable = upstreamNodeIds[0] || "raw_data";
+			const rightTable = upstreamNodeIds[1] || sourceTable;
 			const joinType = config.joinType || "INNER";
-			const key = config.key || "id";
-			return `CREATE TEMP TABLE ${nodeId} AS SELECT a.*, b.* FROM ${leftTable} a ${joinType} JOIN ${rightTable} b ON a.${key} = b.${key};`;
+			const leftKey = config.leftKey || "user_id";
+			const rightKey = config.rightKey || "user_id";
+
+			return `CREATE TEMP TABLE ${nodeId} AS SELECT a.*, b.* RENAME (b.${rightKey} AS right_${rightKey}) FROM ${leftTable} a ${joinType} JOIN ${rightTable} b ON a.${leftKey} = b.${rightKey};`;
 		}
 
 		default:

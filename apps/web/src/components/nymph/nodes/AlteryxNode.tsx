@@ -1,6 +1,13 @@
 import React, { useState } from "react";
 import { Handle, Position, NodeProps, Node } from "@xyflow/react";
-import { Filter, Database, Sigma, GitMerge, Code } from "lucide-react";
+import {
+	Filter,
+	Database,
+	Sigma,
+	GitMerge,
+	Code,
+	Calculator,
+} from "lucide-react";
 
 export interface AlteryxNodeConfig {
 	field?: string;
@@ -11,7 +18,10 @@ export interface AlteryxNodeConfig {
 	target?: string;
 	tableName?: string;
 	joinType?: string;
-	key?: string;
+	leftKey?: string;
+	rightKey?: string;
+	outputColumn?: string;
+	expression?: string;
 }
 
 export interface AlteryxNodeData extends Record<string, unknown> {
@@ -25,7 +35,6 @@ export interface AlteryxNodeData extends Record<string, unknown> {
 }
 
 export const AlteryxNode: React.FC<NodeProps<Node<AlteryxNodeData>>> = ({
-	id,
 	data,
 	selected,
 }) => {
@@ -59,6 +68,14 @@ export const AlteryxNode: React.FC<NodeProps<Node<AlteryxNodeData>>> = ({
 					label: "Filter",
 					cat: "Preparation",
 				};
+			case "FORMULA":
+				return {
+					bg: "bg-teal-950/80",
+					border: "border-teal-500",
+					icon: <Calculator className="w-4 h-4 text-teal-400" />,
+					label: "Formula",
+					cat: "Preparation",
+				};
 			case "SUMMARIZE":
 				return {
 					bg: "bg-amber-950/80",
@@ -90,8 +107,42 @@ export const AlteryxNode: React.FC<NodeProps<Node<AlteryxNodeData>>> = ({
 
 	return (
 		<div
-			className={`w-80 rounded-xl border ${selected ? "border-cyan-400 shadow-cyan-500/20 shadow-lg" : theme.border} ${theme.bg} backdrop-blur-md p-3 text-slate-100 shadow-xl transition-all`}
+			className={`w-80 relative rounded-xl border ${selected ? "border-cyan-400 shadow-cyan-500/30 shadow-xl" : theme.border} ${theme.bg} backdrop-blur-md p-3 text-slate-100 shadow-xl transition-all`}
 		>
+			{/* 👈 左側 Target 腳位（貼合左邊框） */}
+			{nodeType === "JOIN" ? (
+				<>
+					<div className="absolute left-2 top-[30%] -translate-y-1/2 text-[9px] font-bold text-purple-300 pointer-events-none">
+						L
+					</div>
+					<Handle
+						type="target"
+						id="left"
+						position={Position.Left}
+						style={{ top: "30%" }}
+						className="w-3 h-3 bg-purple-400 border-2 border-slate-950 -left-1.5"
+					/>
+
+					<div className="absolute left-2 top-[70%] -translate-y-1/2 text-[9px] font-bold text-purple-300 pointer-events-none">
+						R
+					</div>
+					<Handle
+						type="target"
+						id="right"
+						position={Position.Left}
+						style={{ top: "70%" }}
+						className="w-3 h-3 bg-purple-400 border-2 border-slate-950 -left-1.5"
+					/>
+				</>
+			) : (
+				<Handle
+					type="target"
+					position={Position.Left}
+					style={{ top: "50%" }}
+					className="w-3 h-3 bg-slate-300 border-2 border-slate-950 -left-1.5 -translate-y-1/2"
+				/>
+			)}
+
 			{/* 頂部 Header */}
 			<div className="flex items-center justify-between pb-2 border-b border-slate-800">
 				<div className="flex items-center space-x-2">
@@ -153,6 +204,73 @@ export const AlteryxNode: React.FC<NodeProps<Node<AlteryxNodeData>>> = ({
 					</div>
 				)}
 
+				{nodeType === "FORMULA" && (
+					<div className="space-y-1.5 bg-slate-900/60 p-2 rounded-lg border border-slate-800">
+						<span className="text-[10px] font-bold text-teal-400 uppercase">
+							New Column Formula
+						</span>
+						<div className="flex items-center justify-between text-[11px]">
+							<span className="text-slate-400">Output Col:</span>
+							<input
+								value={config.outputColumn || "amount_taxed"}
+								onChange={(e) =>
+									updateConfig("outputColumn", e.target.value)
+								}
+								className="w-32 bg-slate-950 border border-slate-800 rounded px-1.5 py-0.5 text-slate-200"
+							/>
+						</div>
+						<div className="flex items-center justify-between text-[11px]">
+							<span className="text-slate-400">Expression:</span>
+							<input
+								value={config.expression || "amount * 1.1"}
+								onChange={(e) =>
+									updateConfig("expression", e.target.value)
+								}
+								className="w-32 bg-slate-950 border border-slate-800 rounded px-1.5 py-0.5 text-teal-300 font-mono"
+							/>
+						</div>
+					</div>
+				)}
+
+				{nodeType === "JOIN" && (
+					<div className="space-y-1.5 bg-slate-900/60 p-2 rounded-lg border border-slate-800">
+						<span className="text-[10px] font-bold text-purple-400 uppercase">
+							Join Match Keys
+						</span>
+						<div className="flex items-center justify-between text-[11px]">
+							<span className="text-slate-400">Join Type:</span>
+							<select
+								value={config.joinType || "INNER"}
+								onChange={(e) =>
+									updateConfig("joinType", e.target.value)
+								}
+								className="bg-slate-950 border border-slate-800 rounded px-1 text-purple-300"
+							>
+								<option value="INNER">INNER JOIN</option>
+								<option value="LEFT">LEFT JOIN</option>
+								<option value="FULL">FULL JOIN</option>
+							</select>
+						</div>
+						<div className="flex items-center space-x-1 text-[11px]">
+							<input
+								value={config.leftKey || "user_id"}
+								onChange={(e) =>
+									updateConfig("leftKey", e.target.value)
+								}
+								className="w-24 bg-slate-950 border border-slate-800 rounded px-1 py-0.5 text-slate-200"
+							/>
+							<span className="text-slate-500">=</span>
+							<input
+								value={config.rightKey || "user_id"}
+								onChange={(e) =>
+									updateConfig("rightKey", e.target.value)
+								}
+								className="w-24 bg-slate-950 border border-slate-800 rounded px-1 py-0.5 text-slate-200"
+							/>
+						</div>
+					</div>
+				)}
+
 				{nodeType === "SUMMARIZE" && (
 					<div className="space-y-1.5 bg-slate-900/60 p-2 rounded-lg border border-slate-800">
 						<span className="text-[10px] font-bold text-amber-400 uppercase">
@@ -194,7 +312,6 @@ export const AlteryxNode: React.FC<NodeProps<Node<AlteryxNodeData>>> = ({
 					</div>
 				)}
 
-				{/* 自動轉譯 SQL 預覽 */}
 				{showSqlPreview && (
 					<div className="p-2 bg-slate-950 rounded border border-slate-800 font-mono text-[10px] text-slate-400">
 						<code>{data.sqlQuery || "SELECT * FROM table;"}</code>
@@ -202,38 +319,37 @@ export const AlteryxNode: React.FC<NodeProps<Node<AlteryxNodeData>>> = ({
 				)}
 			</div>
 
-			{/* 腳位 Handle */}
-			<Handle
-				type="target"
-				position={Position.Top}
-				className="w-2.5 h-2.5 bg-slate-400 border-2 border-slate-950"
-			/>
+			{/* 👉 右側 Source 腳位（貼合右邊框，標籤置於內部） */}
 			{nodeType === "FILTER" ? (
-				<div className="flex justify-between px-4 pt-1 text-[9px] font-bold text-slate-500">
-					<div className="relative">
-						<span>T</span>
-						<Handle
-							type="source"
-							id="true"
-							position={Position.Bottom}
-							className="w-2.5 h-2.5 bg-emerald-400 border-2 border-slate-950"
-						/>
+				<>
+					<div className="absolute right-2 top-[30%] -translate-y-1/2 text-[9px] font-bold text-emerald-400 pointer-events-none">
+						T
 					</div>
-					<div className="relative">
-						<span>F</span>
-						<Handle
-							type="source"
-							id="false"
-							position={Position.Bottom}
-							className="w-2.5 h-2.5 bg-rose-400 border-2 border-slate-950"
-						/>
+					<Handle
+						type="source"
+						id="true"
+						position={Position.Right}
+						style={{ top: "30%" }}
+						className="w-3 h-3 bg-emerald-400 border-2 border-slate-950 -right-1.5"
+					/>
+
+					<div className="absolute right-2 top-[70%] -translate-y-1/2 text-[9px] font-bold text-rose-400 pointer-events-none">
+						F
 					</div>
-				</div>
+					<Handle
+						type="source"
+						id="false"
+						position={Position.Right}
+						style={{ top: "70%" }}
+						className="w-3 h-3 bg-rose-400 border-2 border-slate-950 -right-1.5"
+					/>
+				</>
 			) : (
 				<Handle
 					type="source"
-					position={Position.Bottom}
-					className="w-2.5 h-2.5 bg-cyan-400 border-2 border-slate-950"
+					position={Position.Right}
+					style={{ top: "50%" }}
+					className="w-3 h-3 bg-cyan-400 border-2 border-slate-950 -right-1.5 -translate-y-1/2"
 				/>
 			)}
 		</div>

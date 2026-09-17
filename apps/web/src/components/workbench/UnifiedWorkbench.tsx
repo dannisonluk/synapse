@@ -12,6 +12,7 @@ import {
 import { ExecutionViewMode, SynapseASTGraph } from "../../types/workbench";
 import { NymphCanvas } from "../nymph/NymphCanvas";
 import { Palette } from "./Palette";
+import { ikaros } from "../../engine/ikaros/client";
 
 export const UnifiedWorkbench: React.FC = () => {
 	const [viewMode, setViewMode] = useState<ExecutionViewMode>("CANVAS_FOCUS");
@@ -27,44 +28,72 @@ export const UnifiedWorkbench: React.FC = () => {
 	]);
 	const [inputPrompt, setInputPrompt] = useState("");
 
-	const handleSendMessage = (e: React.FormEvent) => {
+	// 在 UnifiedWorkbench.tsx 中的 handleSendMessage 方法更新：
+	const handleSendMessage = async (e: React.FormEvent) => {
 		e.preventDefault();
 		if (!inputPrompt.trim()) return;
 
+		const userText = inputPrompt;
+		setInputPrompt("");
 		setChatMessages((prev) => [
 			...prev,
-			{ sender: "user", text: inputPrompt },
+			{ sender: "user", text: userText },
 		]);
-		const currentInput = inputPrompt;
-		setInputPrompt("");
 
-		// 模擬 Agent 處理邏輯
-		setTimeout(() => {
-			if (viewMode === "SILENT") {
+		try {
+			const response = await fetch(
+				"http://localhost:8000/api/v1/hermes/chat",
+				{
+					method: "POST",
+					headers: { "Content-Type": "application/json" },
+					body: JSON.stringify({
+						prompt: userText,
+						execution_mode: viewMode,
+						current_dag: { nodes: [], edges: [] }, // 可帶入當前畫布節點
+					}),
+				},
+			);
+
+			const data = await response.json();
+
+			if (data.action_type === "INLINE_SQL" && data.sql_query) {
+				try {
+					const queryResult = await ikaros.query(data.sql_query);
+					setChatMessages((prev) => [
+						...prev,
+						{
+							sender: "hermes",
+							text: data.message,
+							dataPreview: queryResult,
+						},
+					]);
+				} catch (sqlErr) {
+					setChatMessages((prev) => [
+						...prev,
+						{
+							sender: "hermes",
+							text: `${data.message}\n(SQL: ${data.sql_query})`,
+						},
+					]);
+				}
+			} else if (data.action_type === "MUTATE_AST" && data.ast_patch) {
 				setChatMessages((prev) => [
 					...prev,
-					{
-						sender: "hermes",
-						text: `Calculated metrics for query: "${currentInput}"`,
-						dataPreview: [
-							{
-								year: 2026,
-								total_amount: 1500,
-								customer_count: 1,
-							},
-						],
-					},
+					{ sender: "hermes", text: data.message },
 				]);
-			} else {
-				setChatMessages((prev) => [
-					...prev,
-					{
-						sender: "hermes",
-						text: `Updated workflow canvas in response to: "${currentInput}"`,
-					},
-				]);
+				// 觸發畫布新增節點通知
+				window.dispatchEvent(
+					new CustomEvent("SYNAPSE_AST_PATCH", {
+						detail: data.ast_patch,
+					}),
+				);
 			}
-		}, 600);
+		} catch (err) {
+			setChatMessages((prev) => [
+				...prev,
+				{ sender: "hermes", text: "Hermes Agent Connection Failed." },
+			]);
+		}
 	};
 
 	return (

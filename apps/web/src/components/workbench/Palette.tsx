@@ -1,5 +1,5 @@
 import React from "react";
-import { Layers, Database, Filter, Sigma, GitMerge } from "lucide-react";
+import { Layers, Database, Filter, Sigma, GitMerge, Calculator } from "lucide-react";
 
 export const Palette: React.FC = () => {
 	const onDragStart = (event: React.DragEvent, item: any) => {
@@ -52,6 +52,18 @@ export const Palette: React.FC = () => {
 			defaultSql:
 				"SELECT a.*, b.* FROM table_a a JOIN table_b b ON a.id = b.id;",
 			config: { joinType: "INNER", key: "id" },
+		},
+		{
+			type: "FORMULA",
+			label: "Formula",
+			category: "Preparation",
+			icon: <Calculator className="w-4 h-4 text-teal-400" />,
+			defaultSql:
+				"CREATE TEMP TABLE formula_data AS SELECT *, (amount * 1.1) AS amount_taxed FROM raw_data;",
+			config: {
+				outputColumn: "amount_taxed",
+				expression: "amount * 1.1",
+			},
 		},
 	];
 

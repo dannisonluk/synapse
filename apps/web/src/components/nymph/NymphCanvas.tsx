@@ -12,13 +12,14 @@ import {
 	ReactFlowProvider,
 	useReactFlow,
 } from "@xyflow/react";
-import { Wrench } from "lucide-react";
+import { Wrench, Wand2 } from "lucide-react";
 import { SqlNode } from "./nodes/SqlNode";
 import { ParticleEdge } from "./edges/ParticleEdge";
 import { AlteryxNode } from "./nodes/AlteryxNode";
 import { VizChartNode } from "./nodes/VizChartNode";
 import { ikaros } from "../../engine/ikaros/client";
 import { generateSqlFromConfig } from "../../engine/astCompiler";
+import { getLayoutedElements } from "../../engine/autoLayout";
 
 const nodeTypes = {
 	sqlNode: SqlNode,
@@ -39,7 +40,7 @@ interface NymphCanvasProps {
 
 const CanvasInner: React.FC<NymphCanvasProps> = ({ onInspectNode }) => {
 	const reactFlowWrapper = useRef<HTMLDivElement>(null);
-	const { screenToFlowPosition } = useReactFlow();
+	const { screenToFlowPosition, fitView } = useReactFlow();
 	const [isEngineReady, setIsEngineReady] = useState(false);
 	const [queryResult, setQueryResult] = useState<any[] | null>(null);
 	const [chaosLog, setChaosLog] = useState<string | null>(null);
@@ -109,6 +110,21 @@ const CanvasInner: React.FC<NymphCanvasProps> = ({ onInspectNode }) => {
 			return false;
 		}
 	};
+
+	// 拓撲自動排版控制
+	const handleAutoLayout = useCallback(
+		(direction: "LR" | "TB" = "LR") => {
+			const { nodes: layoutedNodes, edges: layoutedEdges } =
+				getLayoutedElements(nodes, edges, direction);
+			setNodes(layoutedNodes);
+			setEdges(layoutedEdges);
+
+			setTimeout(() => {
+				fitView({ duration: 600, padding: 0.2 });
+			}, 50);
+		},
+		[nodes, edges, setNodes, setEdges, fitView],
+	);
 
 	// 卡片表單修改時，動態更新配置並重新編譯 SQL
 	const handleNodeConfigChange = useCallback(
@@ -263,6 +279,33 @@ const CanvasInner: React.FC<NymphCanvasProps> = ({ onInspectNode }) => {
 		[onInspectNode],
 	);
 
+	// 監聽 Hermes AI 的 SYNAPSE_AST_PATCH 事件並自動整齊對齊
+	useEffect(() => {
+		const handleAstPatch = (e: any) => {
+			const patch = e.detail;
+			if (patch?.nodes) {
+				setNodes((prevNodes) => {
+					const nextNodes = [...prevNodes, ...patch.nodes];
+					const nextEdges = [...edges, ...(patch.edges || [])];
+					const { nodes: layouted } = getLayoutedElements(
+						nextNodes,
+						nextEdges,
+						"LR",
+					);
+					return layouted;
+				});
+				if (patch.edges) {
+					setEdges((prevEdges) => [...prevEdges, ...patch.edges]);
+				}
+				setTimeout(() => fitView({ duration: 600, padding: 0.2 }), 100);
+			}
+		};
+
+		window.addEventListener("SYNAPSE_AST_PATCH", handleAstPatch);
+		return () =>
+			window.removeEventListener("SYNAPSE_AST_PATCH", handleAstPatch);
+	}, [edges, setNodes, setEdges, fitView]);
+
 	return (
 		<div
 			ref={reactFlowWrapper}
@@ -270,12 +313,23 @@ const CanvasInner: React.FC<NymphCanvasProps> = ({ onInspectNode }) => {
 			onDrop={onDrop}
 			className="w-full h-full relative bg-slate-950"
 		>
-			{chaosLog && (
-				<div className="absolute top-4 left-4 z-10 bg-amber-950/80 border border-amber-500/60 p-3 rounded-lg text-xs text-amber-200 max-w-lg shadow-2xl flex items-center space-x-2 backdrop-blur animate-fade-in">
-					<Wrench className="w-4 h-4 text-amber-400 shrink-0 animate-spin" />
-					<span>{chaosLog}</span>
-				</div>
-			)}
+			{/* 頂部工具列：包含 Auto Layout 按鈕與 Chaos 提示 */}
+			<div className="absolute top-4 left-4 z-10 flex items-center space-x-3">
+				<button
+					onClick={() => handleAutoLayout("LR")}
+					className="flex items-center space-x-1.5 bg-slate-900/90 hover:bg-slate-800 border border-cyan-500/40 text-cyan-300 text-xs px-3 py-1.5 rounded-lg backdrop-blur shadow-lg transition-all active:scale-95"
+				>
+					<Wand2 className="w-3.5 h-3.5 text-cyan-400" />
+					<span>Auto Layout (Left to Right)</span>
+				</button>
+
+				{chaosLog && (
+					<div className="bg-amber-950/80 border border-amber-500/60 p-2 px-3 rounded-lg text-xs text-amber-200 shadow-2xl flex items-center space-x-2 backdrop-blur animate-fade-in">
+						<Wrench className="w-3.5 h-3.5 text-amber-400 shrink-0 animate-spin" />
+						<span>{chaosLog}</span>
+					</div>
+				)}
+			</div>
 
 			<ReactFlow
 				nodes={nodes}

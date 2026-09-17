@@ -46,3 +46,6 @@ async def fix_sql(req: ChaosFixRequest):
     except Exception as e:
         print(f"❌ Chaos Execution Error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+from hermes import router as hermes_router
+app.include_router(hermes_router)
