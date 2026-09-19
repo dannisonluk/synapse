@@ -1,63 +1,45 @@
-import * as duckdb from "@duckdb/duckdb-wasm";
-import duckdb_wasm from "@duckdb/duckdb-wasm/dist/duckdb-mvp.wasm?url";
-import mvp_worker from "@duckdb/duckdb-wasm/dist/duckdb-browser-mvp.worker.js?url";
-import { tableToIPC } from "apache-arrow";
+// apps/web/src/engine/ikaros/worker.ts
+// Ikaros Web Worker —— DuckDB-WASM 真正的宿主。
+//
+// 這個檔案以前是死 code（client.ts 直接在 main thread 開啟 AsyncDuckDB，worker 從未被載入）。
+// 現在：DuckDB 引擎、CSV 解析、結果集 materialization 全部在這條 thread 發生，
+// main thread 只收「已經有界」的結果 → 百萬行 CSV 不會再 freeze UI。
+//
+// 協議（request/response by id）：
+//   in : { id, op, ...payload }
+//   out: { id, ok: true, ...payload } | { id, ok: false, error: string }
+import { createCore, dispatch } from "./dispatch";
+import type { IkarosCore } from "./core";
 
-let db: duckdb.AsyncDuckDB | null = null;
-let conn: duckdb.AsyncDuckDBConnection | null = null;
-
-async function initIkarosEngine(id: string) {
-	try {
-		const DUCKDB_BUNDLES: duckdb.DuckDBBundles = {
-			mvp: {
-				mainModule: duckdb_wasm,
-				mainWorker: mvp_worker,
-			},
-		};
-
-		const bundle = await duckdb.selectBundle(DUCKDB_BUNDLES);
-		const worker = new Worker(bundle.mainWorker!);
-		const logger = new duckdb.ConsoleLogger();
-
-		db = new duckdb.AsyncDuckDB(logger, worker);
-		await db.instantiate(bundle.mainModule);
-		conn = await db.connect();
-
-		self.postMessage({ id, type: "IKAROS_READY" });
-	} catch (err: any) {
-		console.error("Ikaros Engine Init Error:", err);
-		self.postMessage({ id, type: "IKAROS_ERROR", error: err.message });
-	}
+interface WorkerScope {
+	onmessage: ((ev: MessageEvent) => void) | null;
+	postMessage(message: any, transfer?: Transferable[]): void;
 }
 
-self.onmessage = async (e: MessageEvent) => {
-	const { id, type, payload } = e.data;
+const ctx = self as unknown as WorkerScope;
 
-	if (type === "INIT") {
-		await initIkarosEngine(id);
-		return;
-	}
+let corePromise: Promise<IkarosCore> | null = null;
 
-	if (!conn) {
-		self.postMessage({
-			id,
-			type: "IKAROS_ERROR",
-			error: "Ikaros engine is not ready.",
+function getCore(): Promise<IkarosCore> {
+	if (!corePromise) {
+		corePromise = createCore().catch((err) => {
+			corePromise = null; // 容許下次重試（例如 wasm 網絡重試）
+			throw err;
 		});
-		return;
 	}
+	return corePromise;
+}
+
+ctx.onmessage = async (ev: MessageEvent) => {
+	const msg = ev.data;
+	if (!msg || typeof msg !== "object") return;
+	const { id, op, ...payload } = msg;
 
 	try {
-		if (type === "EXECUTE_SQL") {
-			// 1. 執行 DuckDB 查詢
-			const arrowTable = await conn.query(payload.sql);
-			// 2. 使用 tableToIPC 將 Arrow Table 序列化為二進位流
-			// 使用 as any 避開 DuckDB 內部 Arrow 型別與 apache-arrow 的版本定義衝突
-			const ipcBuffer = tableToIPC(arrowTable as any, "stream");
-			// 3. 回傳 Uint8Array
-			self.postMessage({ id, type: "SUCCESS", result: ipcBuffer });
-		}
+		const core = await getCore();
+		const result = await dispatch(core, String(op), payload);
+		ctx.postMessage({ id, ok: true, ...result });
 	} catch (err: any) {
-		self.postMessage({ id, type: "IKAROS_ERROR", error: err.message });
+		ctx.postMessage({ id, ok: false, error: err?.message || String(err) });
 	}
 };

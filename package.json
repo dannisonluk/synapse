@@ -5,7 +5,10 @@
     "build": "turbo run build",
     "dev": "turbo run dev",
     "lint": "turbo run lint",
-    "clean": "turbo run clean"
+    "clean": "turbo run clean",
+    "verify": "node scripts/verify.mjs",
+    "gen:catalog": "node scripts/gen_node_catalog.mjs",
+    "check:catalog": "node scripts/gen_node_catalog.mjs --check"
   },
   "devDependencies": {
     "@types/node": "^20.11.0",
