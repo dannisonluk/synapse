@@ -1,0 +1,733 @@
+{
+  "version": 1,
+  "generatedFrom": "apps/web/src/engine/nodeCatalog.ts",
+  "types": [
+    "INPUT_DUCKDB",
+    "DATA_CLEANSING",
+    "FILTER",
+    "FORMULA",
+    "IMPUTE",
+    "MULTI_ROW_FORMULA",
+    "RANK",
+    "RENAME",
+    "RUNNING_TOTAL",
+    "SAMPLE",
+    "SELECT",
+    "SORT",
+    "TEXT_TO_COLUMNS",
+    "UNIQUE",
+    "CROSS_TAB",
+    "SUMMARIZE",
+    "TRANSPOSE",
+    "APPEND_FIELDS",
+    "FIND_REPLACE",
+    "JOIN",
+    "UNION",
+    "VIZ_CHART"
+  ],
+  "hintKeys": [
+    "fileName",
+    "columns",
+    "field",
+    "op",
+    "val",
+    "outputColumn",
+    "expression",
+    "method",
+    "fillValue",
+    "partitionBy",
+    "orderBy",
+    "target",
+    "renames",
+    "sampleMode",
+    "separator",
+    "outputColumns",
+    "pivotColumn",
+    "valueColumn",
+    "aggFunc",
+    "groupBy",
+    "aggregations",
+    "nameColumn",
+    "findField",
+    "lookupField",
+    "replaceField",
+    "unmatched",
+    "joinType",
+    "leftKey",
+    "rightKey",
+    "unionMode",
+    "chartType",
+    "xAxis",
+    "yAxis"
+  ],
+  "promptSection": "- INPUT_DUCKDB: {\"tableName\": \"<字串>\", \"fileName\": \"<字串>\"}  — 從 DuckDB 資料表或上傳的 CSV / Parquet 檔載入資料。 用途：每個 pipeline 的起點。使用者在畫布上已有資料時，改連現有節點即可，不要另開一個 Input。\n- DATA_CLEANSING: {\"columns\": [\"<欄位名>\", ...], \"trim\": true | false, \"collapse\": true | false, \"emptyToNull\": true | false}   [必填: columns]  — 清理文字欄位：去頭尾空白、壓縮內部連續空白、空字串轉 NULL。 用途：使用者說「清理 / 去空白 / 格式不統一 / trim / 空字串」時。\n- FILTER: {\"field\": \"<欄位名>\", \"op\": \"=\" | \"!=\" | \">\" | \">=\" | \"<\" | \"<=\" | \"LIKE\" | \"ILIKE\" | \"IS\" | \"IS NOT\", \"val\": \"<字串>\"}   [必填: field]  — 依條件保留列，並產生 true / false 兩個輸出分支。 用途：使用者說「只要 / 過濾 / 大於 / 小於 / only / where」時。\n- FORMULA: {\"outputColumn\": \"<字串>\", \"expression\": \"<字串>\"}   [必填: outputColumn, expression]  — 用運算式新增一個欄位（DuckDB scalar expression）。 用途：需要計算新欄位（金額加成、字串拼接、條件旗標）時。\n- IMPUTE: {\"columns\": [\"<欄位名>\", ...], \"method\": \"CONSTANT\" | \"MEAN\", \"fillValue\": \"<字串>\"}   [必填: columns]  — 補上欄位中的空值（常數或該欄平均）。 用途：使用者說「補空值 / 填補缺漏 / fill null / 缺失值」時。\n- MULTI_ROW_FORMULA: {\"outputColumn\": \"<字串>\", \"expression\": \"<字串>\", \"partitionBy\": [\"<欄位名>\", ...], \"orderBy\": \"<欄位名>\", \"descending\": true | false}   [必填: outputColumn, expression]  — 可跨列的運算式（視窗函數），例如取上一列的值。 用途：使用者說「上一列 / 前一筆 / 與前值比較 / LAG」時。\n- RANK: {\"target\": \"<欄位名>\", \"outputColumn\": \"<字串>\", \"method\": \"RANK\" | \"DENSE_RANK\" | \"ROW_NUMBER\", \"partitionBy\": [\"<欄位名>\", ...], \"descending\": true | false}   [必填: target]  — 排名（RANK / DENSE_RANK / ROW_NUMBER）。 用途：使用者說「排名 / 第幾名 / rank / top 排行」時。\n- RENAME: {\"renames\": [{\"from\": \"<舊欄位名>\", \"to\": \"<新欄位名>\"}]}  — 把欄位改名，保留原本位置。 用途：使用者說「改名 / 重新命名 / rename」時。\n- RUNNING_TOTAL: {\"target\": \"<欄位名>\", \"outputColumn\": \"<字串>\", \"partitionBy\": [\"<欄位名>\", ...], \"orderBy\": \"<欄位名>\"}   [必填: target]  — 累計加總（可依分區與排序）。 用途：使用者說「累計 / 累加 / running total / 到目前為止總和」時。\n- SAMPLE: {\"sampleSize\": 100, \"sampleMode\": \"FIRST\" | \"RANDOM\"}  — 取前 N 列，或隨機取樣 N 列（固定 seed，可重現）。 用途：使用者說「取前幾筆 / 抽樣 / 樣本 / top N 筆」時。\n- SELECT: {\"columns\": [\"<欄位名>\", ...]}  — 挑選要保留的欄位（空的 columns = 全選）。 用途：使用者說「只要某幾欄 / 去掉某欄 / 選欄位」時。\n- SORT: {\"field\": \"<欄位名>\", \"descending\": true | false}   [必填: field]  — 依指定欄位排序。 用途：使用者說「排序 / 由大到小 / 由小到大 / sort by」時。\n- TEXT_TO_COLUMNS: {\"field\": \"<欄位名>\", \"separator\": \"<字串>\", \"outputColumns\": [\"<名稱>\", ...]}   [必填: field, outputColumns]  — 用分隔符把一個字串欄位拆成多個欄位。 用途：使用者說「拆欄 / 分隔 / 分割字串 / split」時。\n- UNIQUE: {\"columns\": [\"<欄位名>\", ...]}  — 依指定欄位去重，每個鍵只保留第一列。 用途：使用者說「去重 / 去除重複 / unique / distinct / 只留一筆」時。\n- CROSS_TAB: {\"pivotColumn\": \"<欄位名>\", \"valueColumn\": \"<欄位名>\", \"aggFunc\": \"SUM\" | \"AVG\" | \"COUNT\" | \"MIN\" | \"MAX\" | \"FIRST\", \"groupBy\": [\"<欄位名>\", ...]}   [必填: pivotColumn, valueColumn]  — 列轉欄（pivot）：把某欄的值展開成新欄位。 用途：使用者說「樞紐 / 列轉欄 / 展開 / pivot / 每個 X 一欄」時。\n- SUMMARIZE: {\"groupBy\": [\"<欄位名>\", ...], \"aggregations\": [{\"func\": \"SUM\" | \"AVG\" | \"COUNT\" | \"COUNT_DISTINCT\" | \"MIN\" | \"MAX\" | \"STDDEV\" | \"MEDIAN\", \"target\": \"<欄位名 或 *>\"}]}  — 依分組鍵聚合，支援多個分組鍵與多個聚合。 用途：使用者說「by X / group by X / per X / 加總 / 平均 / 合計 / 各…的總和」時。\n- TRANSPOSE: {\"columns\": [\"<欄位名>\", ...], \"nameColumn\": \"<字串>\", \"valueColumn\": \"<字串>\"}   [必填: columns]  — 欄轉列（unpivot）：把多個欄位收斂成「名稱 + 值」兩欄。 用途：使用者說「轉置 / 欄轉列 / 寬轉長 / unpivot / 多欄合併成一欄」時。\n- APPEND_FIELDS: {}  — 把第二個輸入的欄位接到每一列後面（笛卡爾積，不需鍵）。 用途：使用者說「附加欄位 / 每列都加上 / 交叉連接 / append / cross join」時。\n- FIND_REPLACE: {\"findField\": \"<欄位名>\", \"lookupField\": \"<欄位名>\", \"replaceField\": \"<欄位名>\", \"outputColumn\": \"<字串>\", \"unmatched\": \"KEEP\" | \"NULL\"}   [必填: findField, lookupField, replaceField]  — 用查找表把某欄的值替換掉，只帶回一個值欄位（不像 Join 帶回全部欄位）。 用途：使用者說「查找替換 / 對照表換值 / 代碼換名稱 / lookup / mapping」時。\n- JOIN: {\"joinType\": \"INNER\" | \"LEFT\" | \"RIGHT\" | \"FULL\" | \"CROSS\", \"leftKey\": \"<欄位名>\", \"rightKey\": \"<欄位名>\"}  — 依鍵合併兩個輸入，保留兩邊全部欄位。 用途：使用者說「合併 / 連接 / 對照 / join / 關聯兩張表」時。\n- UNION: {\"unionMode\": \"BY_NAME\" | \"POSITION\"}  — 把 N 個輸入上下疊起來（預設依欄位名對齊）。 用途：使用者說「合併多張表 / 疊起來 / union / 串接 / 同一種資料合在一起」時。\n- VIZ_CHART: {\"chartType\": \"BAR\" | \"LINE\" | \"PIE\" | \"KPI\", \"xAxis\": \"<欄位名>\", \"yAxis\": \"<欄位名>\"}  — 把上游結果畫成圖表（不產生輸出表）。 用途：使用者說「畫圖 / 圖表 / 視覺化 / chart / 趨勢圖」時，放在 pipeline 末端。",
+  "nodes": [
+    {
+      "type": "INPUT_DUCKDB",
+      "label": "Input Data",
+      "category": "In/Out",
+      "description": "從 DuckDB 資料表或上傳的 CSV / Parquet 檔載入資料。",
+      "whenToUse": "每個 pipeline 的起點。使用者在畫布上已有資料時，改連現有節點即可，不要另開一個 Input。",
+      "inputs": 0,
+      "fields": [
+        {
+          "name": "tableName",
+          "kind": "text",
+          "label": "資料表",
+          "required": false,
+          "hint": "留空則由平台依節點 id 指定"
+        },
+        {
+          "name": "fileName",
+          "kind": "text",
+          "label": "檔案",
+          "required": false,
+          "hint": "已上傳的檔名（CSV / Parquet）"
+        }
+      ]
+    },
+    {
+      "type": "DATA_CLEANSING",
+      "label": "Data Cleansing",
+      "category": "Preparation",
+      "description": "清理文字欄位：去頭尾空白、壓縮內部連續空白、空字串轉 NULL。",
+      "whenToUse": "使用者說「清理 / 去空白 / 格式不統一 / trim / 空字串」時。",
+      "inputs": 1,
+      "fields": [
+        {
+          "name": "columns",
+          "kind": "fieldList",
+          "label": "要清理的欄位",
+          "required": true
+        },
+        {
+          "name": "trim",
+          "kind": "boolean",
+          "label": "去頭尾空白",
+          "required": false,
+          "default": true
+        },
+        {
+          "name": "collapse",
+          "kind": "boolean",
+          "label": "壓縮內部空白",
+          "required": false,
+          "default": false,
+          "hint": "把連續空白壓成一個（含 trim）"
+        },
+        {
+          "name": "emptyToNull",
+          "kind": "boolean",
+          "label": "空字串轉 NULL",
+          "required": false,
+          "default": true
+        }
+      ]
+    },
+    {
+      "type": "FILTER",
+      "label": "Filter",
+      "category": "Preparation",
+      "description": "依條件保留列，並產生 true / false 兩個輸出分支。",
+      "whenToUse": "使用者說「只要 / 過濾 / 大於 / 小於 / only / where」時。",
+      "inputs": 1,
+      "fields": [
+        {
+          "name": "field",
+          "kind": "field",
+          "label": "欄位",
+          "required": true
+        },
+        {
+          "name": "op",
+          "kind": "enum",
+          "label": "運算子",
+          "required": false,
+          "values": [
+            "=",
+            "!=",
+            ">",
+            ">=",
+            "<",
+            "<=",
+            "LIKE",
+            "ILIKE",
+            "IS",
+            "IS NOT"
+          ],
+          "default": ">"
+        },
+        {
+          "name": "val",
+          "kind": "text",
+          "label": "值",
+          "required": false,
+          "hint": "字面值；數字與布林不加引號"
+        }
+      ]
+    },
+    {
+      "type": "FORMULA",
+      "label": "Formula",
+      "category": "Preparation",
+      "description": "用運算式新增一個欄位（DuckDB scalar expression）。",
+      "whenToUse": "需要計算新欄位（金額加成、字串拼接、條件旗標）時。",
+      "inputs": 1,
+      "fields": [
+        {
+          "name": "outputColumn",
+          "kind": "text",
+          "label": "新欄位名",
+          "required": true
+        },
+        {
+          "name": "expression",
+          "kind": "text",
+          "label": "運算式",
+          "required": true,
+          "hint": "DuckDB 純量運算式，例如 amount * 1.1 或 UPPER(name)"
+        }
+      ]
+    },
+    {
+      "type": "IMPUTE",
+      "label": "Impute",
+      "category": "Preparation",
+      "description": "補上欄位中的空值（常數或該欄平均）。",
+      "whenToUse": "使用者說「補空值 / 填補缺漏 / fill null / 缺失值」時。",
+      "inputs": 1,
+      "fields": [
+        {
+          "name": "columns",
+          "kind": "fieldList",
+          "label": "要補的欄位",
+          "required": true
+        },
+        {
+          "name": "method",
+          "kind": "enum",
+          "label": "補值方式",
+          "required": false,
+          "values": [
+            "CONSTANT",
+            "MEAN"
+          ],
+          "default": "CONSTANT",
+          "hint": "CONSTANT = 用 fillValue 填；MEAN = 用該欄平均填"
+        },
+        {
+          "name": "fillValue",
+          "kind": "text",
+          "label": "常數值",
+          "required": false,
+          "hint": "method = CONSTANT 時使用"
+        }
+      ]
+    },
+    {
+      "type": "MULTI_ROW_FORMULA",
+      "label": "Multi-Row Formula",
+      "category": "Preparation",
+      "description": "可跨列的運算式（視窗函數），例如取上一列的值。",
+      "whenToUse": "使用者說「上一列 / 前一筆 / 與前值比較 / LAG」時。",
+      "inputs": 1,
+      "fields": [
+        {
+          "name": "outputColumn",
+          "kind": "text",
+          "label": "新欄位名",
+          "required": true
+        },
+        {
+          "name": "expression",
+          "kind": "text",
+          "label": "運算式",
+          "required": true,
+          "hint": "可用視窗函數，例如 LAG(amount, 1) 或 LAG(amount, 1) - amount"
+        },
+        {
+          "name": "partitionBy",
+          "kind": "fieldList",
+          "label": "分區鍵",
+          "required": false,
+          "hint": "各分區獨立計算"
+        },
+        {
+          "name": "orderBy",
+          "kind": "field",
+          "label": "排序鍵",
+          "required": false
+        },
+        {
+          "name": "descending",
+          "kind": "boolean",
+          "label": "排序遞減",
+          "required": false,
+          "default": false
+        }
+      ]
+    },
+    {
+      "type": "RANK",
+      "label": "Rank",
+      "category": "Preparation",
+      "description": "排名（RANK / DENSE_RANK / ROW_NUMBER）。",
+      "whenToUse": "使用者說「排名 / 第幾名 / rank / top 排行」時。",
+      "inputs": 1,
+      "fields": [
+        {
+          "name": "target",
+          "kind": "field",
+          "label": "排名依據欄位",
+          "required": true
+        },
+        {
+          "name": "outputColumn",
+          "kind": "text",
+          "label": "輸出欄位名",
+          "required": false
+        },
+        {
+          "name": "method",
+          "kind": "enum",
+          "label": "排名方式",
+          "required": false,
+          "values": [
+            "RANK",
+            "DENSE_RANK",
+            "ROW_NUMBER"
+          ],
+          "default": "RANK",
+          "hint": "RANK 有跳號、DENSE_RANK 不跳號、ROW_NUMBER 不並列"
+        },
+        {
+          "name": "partitionBy",
+          "kind": "fieldList",
+          "label": "分區鍵",
+          "required": false
+        },
+        {
+          "name": "descending",
+          "kind": "boolean",
+          "label": "大者在先",
+          "required": false,
+          "default": true
+        }
+      ]
+    },
+    {
+      "type": "RENAME",
+      "label": "Rename",
+      "category": "Preparation",
+      "description": "把欄位改名，保留原本位置。",
+      "whenToUse": "使用者說「改名 / 重新命名 / rename」時。",
+      "inputs": 1,
+      "fields": [
+        {
+          "name": "renames",
+          "kind": "pairList",
+          "label": "改名清單",
+          "required": false,
+          "hint": "每組 {from, to}"
+        }
+      ]
+    },
+    {
+      "type": "RUNNING_TOTAL",
+      "label": "Running Total",
+      "category": "Preparation",
+      "description": "累計加總（可依分區與排序）。",
+      "whenToUse": "使用者說「累計 / 累加 / running total / 到目前為止總和」時。",
+      "inputs": 1,
+      "fields": [
+        {
+          "name": "target",
+          "kind": "field",
+          "label": "累計欄位",
+          "required": true
+        },
+        {
+          "name": "outputColumn",
+          "kind": "text",
+          "label": "輸出欄位名",
+          "required": false
+        },
+        {
+          "name": "partitionBy",
+          "kind": "fieldList",
+          "label": "分區鍵",
+          "required": false
+        },
+        {
+          "name": "orderBy",
+          "kind": "field",
+          "label": "排序鍵",
+          "required": false
+        }
+      ]
+    },
+    {
+      "type": "SAMPLE",
+      "label": "Sample",
+      "category": "Preparation",
+      "description": "取前 N 列，或隨機取樣 N 列（固定 seed，可重現）。",
+      "whenToUse": "使用者說「取前幾筆 / 抽樣 / 樣本 / top N 筆」時。",
+      "inputs": 1,
+      "fields": [
+        {
+          "name": "sampleSize",
+          "kind": "number",
+          "label": "列數",
+          "required": false,
+          "default": 100
+        },
+        {
+          "name": "sampleMode",
+          "kind": "enum",
+          "label": "取樣方式",
+          "required": false,
+          "values": [
+            "FIRST",
+            "RANDOM"
+          ],
+          "default": "FIRST",
+          "hint": "FIRST = 取前 N 列；RANDOM = 隨機取樣（seed 固定為 42）"
+        }
+      ]
+    },
+    {
+      "type": "SELECT",
+      "label": "Select",
+      "category": "Preparation",
+      "description": "挑選要保留的欄位（空的 columns = 全選）。",
+      "whenToUse": "使用者說「只要某幾欄 / 去掉某欄 / 選欄位」時。",
+      "inputs": 1,
+      "fields": [
+        {
+          "name": "columns",
+          "kind": "fieldList",
+          "label": "保留欄位",
+          "required": false,
+          "hint": "空陣列 = 全選（passthrough）"
+        }
+      ]
+    },
+    {
+      "type": "SORT",
+      "label": "Sort",
+      "category": "Preparation",
+      "description": "依指定欄位排序。",
+      "whenToUse": "使用者說「排序 / 由大到小 / 由小到大 / sort by」時。",
+      "inputs": 1,
+      "fields": [
+        {
+          "name": "field",
+          "kind": "field",
+          "label": "排序欄位",
+          "required": true
+        },
+        {
+          "name": "descending",
+          "kind": "boolean",
+          "label": "遞減",
+          "required": false,
+          "default": false
+        }
+      ]
+    },
+    {
+      "type": "TEXT_TO_COLUMNS",
+      "label": "Text to Columns",
+      "category": "Preparation",
+      "description": "用分隔符把一個字串欄位拆成多個欄位。",
+      "whenToUse": "使用者說「拆欄 / 分隔 / 分割字串 / split」時。",
+      "inputs": 1,
+      "fields": [
+        {
+          "name": "field",
+          "kind": "field",
+          "label": "來源欄位",
+          "required": true
+        },
+        {
+          "name": "separator",
+          "kind": "text",
+          "label": "分隔符",
+          "required": false,
+          "default": ","
+        },
+        {
+          "name": "outputColumns",
+          "kind": "textList",
+          "label": "輸出欄位名",
+          "required": true,
+          "hint": "依序對應第 1、2、3… 段；不足的段會是 NULL"
+        }
+      ]
+    },
+    {
+      "type": "UNIQUE",
+      "label": "Unique",
+      "category": "Preparation",
+      "description": "依指定欄位去重，每個鍵只保留第一列。",
+      "whenToUse": "使用者說「去重 / 去除重複 / unique / distinct / 只留一筆」時。",
+      "inputs": 1,
+      "fields": [
+        {
+          "name": "columns",
+          "kind": "fieldList",
+          "label": "去重鍵",
+          "required": false,
+          "hint": "空陣列 = 整列完全相同才算重複"
+        }
+      ]
+    },
+    {
+      "type": "CROSS_TAB",
+      "label": "Cross Tab",
+      "category": "Transform",
+      "description": "列轉欄（pivot）：把某欄的值展開成新欄位。",
+      "whenToUse": "使用者說「樞紐 / 列轉欄 / 展開 / pivot / 每個 X 一欄」時。",
+      "inputs": 1,
+      "fields": [
+        {
+          "name": "pivotColumn",
+          "kind": "field",
+          "label": "展開欄位",
+          "required": true
+        },
+        {
+          "name": "valueColumn",
+          "kind": "field",
+          "label": "取值欄位",
+          "required": true
+        },
+        {
+          "name": "aggFunc",
+          "kind": "enum",
+          "label": "聚合函數",
+          "required": false,
+          "values": [
+            "SUM",
+            "AVG",
+            "COUNT",
+            "MIN",
+            "MAX",
+            "FIRST"
+          ],
+          "default": "SUM"
+        },
+        {
+          "name": "groupBy",
+          "kind": "fieldList",
+          "label": "保留為列的分組鍵",
+          "required": false
+        }
+      ]
+    },
+    {
+      "type": "SUMMARIZE",
+      "label": "Summarize",
+      "category": "Transform",
+      "description": "依分組鍵聚合，支援多個分組鍵與多個聚合。",
+      "whenToUse": "使用者說「by X / group by X / per X / 加總 / 平均 / 合計 / 各…的總和」時。",
+      "inputs": 1,
+      "fields": [
+        {
+          "name": "groupBy",
+          "kind": "fieldList",
+          "label": "分組鍵",
+          "required": false,
+          "hint": "多個鍵會形成複合分組；空陣列 = 不分组（整表聚合成一列）"
+        },
+        {
+          "name": "aggregations",
+          "kind": "aggList",
+          "label": "聚合",
+          "required": false,
+          "hint": "每組 {func, target}；target 用 * 代表 COUNT(*)"
+        }
+      ]
+    },
+    {
+      "type": "TRANSPOSE",
+      "label": "Transpose",
+      "category": "Transform",
+      "description": "欄轉列（unpivot）：把多個欄位收斂成「名稱 + 值」兩欄。",
+      "whenToUse": "使用者說「轉置 / 欄轉列 / 寬轉長 / unpivot / 多欄合併成一欄」時。",
+      "inputs": 1,
+      "fields": [
+        {
+          "name": "columns",
+          "kind": "fieldList",
+          "label": "要轉的欄位",
+          "required": true
+        },
+        {
+          "name": "nameColumn",
+          "kind": "text",
+          "label": "名稱欄位名",
+          "required": false,
+          "default": "metric"
+        },
+        {
+          "name": "valueColumn",
+          "kind": "text",
+          "label": "值欄位名",
+          "required": false,
+          "default": "value"
+        }
+      ]
+    },
+    {
+      "type": "APPEND_FIELDS",
+      "label": "Append Fields",
+      "category": "Join",
+      "description": "把第二個輸入的欄位接到每一列後面（笛卡爾積，不需鍵）。",
+      "whenToUse": "使用者說「附加欄位 / 每列都加上 / 交叉連接 / append / cross join」時。",
+      "inputs": 2,
+      "fields": []
+    },
+    {
+      "type": "FIND_REPLACE",
+      "label": "Find Replace",
+      "category": "Join",
+      "description": "用查找表把某欄的值替換掉，只帶回一個值欄位（不像 Join 帶回全部欄位）。",
+      "whenToUse": "使用者說「查找替換 / 對照表換值 / 代碼換名稱 / lookup / mapping」時。",
+      "inputs": 2,
+      "fields": [
+        {
+          "name": "findField",
+          "kind": "field",
+          "label": "來源鍵欄位",
+          "required": true
+        },
+        {
+          "name": "lookupField",
+          "kind": "field",
+          "label": "查找表鍵欄位",
+          "required": true
+        },
+        {
+          "name": "replaceField",
+          "kind": "field",
+          "label": "取回的值欄位",
+          "required": true,
+          "hint": "型別必須與 findField 相容（見下方說明）"
+        },
+        {
+          "name": "outputColumn",
+          "kind": "text",
+          "label": "輸出欄位名",
+          "required": false,
+          "hint": "留空 = 就地覆蓋 findField"
+        },
+        {
+          "name": "unmatched",
+          "kind": "enum",
+          "label": "未命中時",
+          "required": false,
+          "values": [
+            "KEEP",
+            "NULL"
+          ],
+          "default": "KEEP",
+          "hint": "KEEP = 保留原值（COALESCE）；NULL = 設為空值"
+        }
+      ]
+    },
+    {
+      "type": "JOIN",
+      "label": "Join",
+      "category": "Join",
+      "description": "依鍵合併兩個輸入，保留兩邊全部欄位。",
+      "whenToUse": "使用者說「合併 / 連接 / 對照 / join / 關聯兩張表」時。",
+      "inputs": 2,
+      "fields": [
+        {
+          "name": "joinType",
+          "kind": "enum",
+          "label": "連接類型",
+          "required": false,
+          "values": [
+            "INNER",
+            "LEFT",
+            "RIGHT",
+            "FULL",
+            "CROSS"
+          ],
+          "default": "INNER"
+        },
+        {
+          "name": "leftKey",
+          "kind": "field",
+          "label": "左鍵",
+          "required": false
+        },
+        {
+          "name": "rightKey",
+          "kind": "field",
+          "label": "右鍵",
+          "required": false
+        }
+      ]
+    },
+    {
+      "type": "UNION",
+      "label": "Union",
+      "category": "Join",
+      "description": "把 N 個輸入上下疊起來（預設依欄位名對齊）。",
+      "whenToUse": "使用者說「合併多張表 / 疊起來 / union / 串接 / 同一種資料合在一起」時。",
+      "inputs": -1,
+      "fields": [
+        {
+          "name": "unionMode",
+          "kind": "enum",
+          "label": "對齊方式",
+          "required": false,
+          "values": [
+            "BY_NAME",
+            "POSITION"
+          ],
+          "default": "BY_NAME",
+          "hint": "BY_NAME 依欄位名對齊（缺欄補 NULL，Alteryx 語意）；POSITION 依欄位順序"
+        }
+      ]
+    },
+    {
+      "type": "VIZ_CHART",
+      "label": "Chart",
+      "category": "BI",
+      "description": "把上游結果畫成圖表（不產生輸出表）。",
+      "whenToUse": "使用者說「畫圖 / 圖表 / 視覺化 / chart / 趨勢圖」時，放在 pipeline 末端。",
+      "inputs": 1,
+      "fields": [
+        {
+          "name": "chartType",
+          "kind": "enum",
+          "label": "圖表類型",
+          "required": false,
+          "values": [
+            "BAR",
+            "LINE",
+            "PIE",
+            "KPI"
+          ],
+          "default": "BAR"
+        },
+        {
+          "name": "xAxis",
+          "kind": "field",
+          "label": "X 軸",
+          "required": false
+        },
+        {
+          "name": "yAxis",
+          "kind": "field",
+          "label": "Y 軸",
+          "required": false
+        }
+      ]
+    }
+  ]
+}

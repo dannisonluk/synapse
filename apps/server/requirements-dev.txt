@@ -1,0 +1,16 @@
+# apps/server/requirements-dev.txt
+#
+# 驗證用的額外依賴 —— 不是 apps/server 的 runtime 依賴。
+#
+# 為什麼需要：scripts/verify.mjs 的 section 6/8 會拿同一個工作流分別編成
+# DuckDB SQL 與 Polars 腳本，然後在真實的 python 裡跑兩邊、斷言算出來的
+# 數字一致。沒有這兩個套件，那幾條斷言會 SKIP（不會紅燈，但等於沒驗到）。
+#
+# 安裝：
+#   apps/server/venv/Scripts/python.exe -m pip install -r requirements-dev.txt
+#
+# ⚠ Polars 在部分 Windows/CPU 組合上會誤判 CPU 指令集，import 時直接拋
+#   RuntimeError: unknown feature flag: 'sse3'。verify.mjs 會在探測與執行
+#   時都帶上 POLARS_SKIP_CPU_CHECK=1（見 findPolarsPython 的註解）。
+duckdb>=1.1.0
+polars>=1.0.0
