@@ -1,13 +1,75 @@
 import React, { useEffect, useState } from "react";
 import { Handle, Position, NodeProps, Node } from "@xyflow/react";
-import { PieChart, RefreshCw } from "lucide-react";
+import { PieChart, RefreshCw, BarChart3, LineChart, Gauge } from "lucide-react";
 import { ikaros } from "../../../engine/ikaros/client";
+import { useTheme } from "../../../theme/ThemeContext";
 
+type ChartType = "BAR" | "LINE" | "PIE" | "KPI";
+
+export interface VizChartConfig {
+	chartType?: ChartType;
+	xAxis?: string;
+	yAxis?: string;
+}
+
+interface VizChartNodeData extends Record<string, unknown> {
+	label?: string;
+	sqlQuery?: string;
+	config?: VizChartConfig;
+	/** 由畫布注入：把設定寫回 data.config（存檔與 Hermes context 都靠它） */
+	onChangeConfig?: (newConfig: VizChartConfig) => void;
+}
+
+const CHART_COLORS = [
+	"#58A6FF",
+	"#DA5B2A",
+	"#3FB950",
+	"#F0B429",
+	"#BF4B8A",
+	"#A371F7",
+	"#39C5CF",
+	"#F0883E",
+];
+
+/**
+ * 動態 BI 視覺化節點：Bar / Line / Pie / KPI
+ * - 執行上游資料表查詢（data.sqlQuery）
+ * - X/Y 軸由使用者動態選擇（options 來自查詢結果欄位）
+ * - 100% 訂閱 ThemeContext
+ */
 export const VizChartNode: React.FC<
-	NodeProps<Node<{ label?: string; sqlQuery?: string }>>
-> = ({ data, selected }) => {
+	NodeProps<Node<VizChartNodeData>>
+> = ({ id, data, selected }) => {
+	const { mode, tokens } = useTheme();
+	const isLight = mode === "claude-light";
+
 	const [chartData, setChartData] = useState<any[]>([]);
 	const [loading, setLoading] = useState(false);
+	const [chartType, setChartType] = useState<ChartType>(
+		data.config?.chartType || "BAR",
+	);
+	const [xAxis, setXAxis] = useState(data.config?.xAxis || "");
+	const [yAxis, setYAxis] = useState(data.config?.yAxis || "");
+
+	// 外部 config 變動 → 同步回本地（存檔還原、Hermes 改 config 都會走這裡）
+	useEffect(() => {
+		setChartType(data.config?.chartType || "BAR");
+		setXAxis(data.config?.xAxis || "");
+		setYAxis(data.config?.yAxis || "");
+	}, [data.config]);
+
+	/**
+	 * 設定一律寫回 data.config。
+	 * 舊版只存在 local state：存檔不保留、送給 Hermes 的 current_dag 永遠是
+	 * palette 預設值、元件重新掛載即遺失。
+	 */
+	const updateConfig = (patch: Partial<VizChartConfig>) => {
+		const next: VizChartConfig = { chartType, xAxis, yAxis, ...patch };
+		setChartType(next.chartType || "BAR");
+		setXAxis(next.xAxis || "");
+		setYAxis(next.yAxis || "");
+		data.onChangeConfig?.(next);
+	};
 
 	const renderChart = async () => {
 		if (!data.sqlQuery) return;
@@ -15,6 +77,15 @@ export const VizChartNode: React.FC<
 		try {
 			const res = await ikaros.query(data.sqlQuery);
 			setChartData(res);
+			// 自動填充軸：無設定時用首兩欄（也要寫回 config，否則重整就沒了）
+			if (res.length > 0) {
+				const keys = Object.keys(res[0]);
+				const nextX = xAxis || keys[0] || "";
+				const nextY = yAxis || keys[1] || keys[0] || "";
+				if (nextX !== xAxis || nextY !== yAxis) {
+					updateConfig({ xAxis: nextX, yAxis: nextY });
+				}
+			}
 		} catch (e) {
 			console.error("Viz Chart Execution Error:", e);
 		} finally {
@@ -24,78 +95,385 @@ export const VizChartNode: React.FC<
 
 	useEffect(() => {
 		renderChart();
+		// eslint-disable-next-line react-hooks/exhaustive-deps
 	}, [data.sqlQuery]);
+
+	const rows = chartData.slice(0, 50);
+	const labels = rows.map((r) => String(r[xAxis] ?? ""));
+	const values = rows.map((r) => Number(r[yAxis]) || 0);
+	const maxVal = Math.max(1, ...values);
+	const total = values.reduce((a, b) => a + b, 0) || 1;
+
+	/** SVG 圓餅切片 path（極座標扇形） */
+	const piePath = (
+		startAngle: number,
+		endAngle: number,
+		r: number,
+	): string => {
+		const cx = 100;
+		const cy = 100;
+		const x1 = cx + r * Math.cos(startAngle);
+		const y1 = cy + r * Math.sin(startAngle);
+		const x2 = cx + r * Math.cos(endAngle);
+		const y2 = cy + r * Math.sin(endAngle);
+		const large = endAngle - startAngle > Math.PI ? 1 : 0;
+		return `M${cx} ${cy} L${x1.toFixed(2)} ${y1.toFixed(
+			2,
+		)} A${r} ${r} 0 ${large} 1 ${x2.toFixed(2)} ${y2.toFixed(
+			2,
+		)} Z`;
+	};
+
+	const inputBorder = isLight ? "#D6C7B2" : "#30363D";
+	const inputBg = isLight ? "#FFFFFF" : "#0D1117";
 
 	return (
 		<div
-			className={`w-80 rounded-xl border bg-slate-900/90 backdrop-blur-md p-3 text-slate-100 shadow-xl transition-all ${selected ? "border-purple-400 shadow-purple-500/20 shadow-lg" : "border-purple-500/50"}`}
+			style={{
+				backgroundColor: isLight ? "#FFFFFF" : "#161B22",
+				borderColor: selected
+					? tokens.accent
+					: isLight
+						? "#E7DFD5"
+						: "#30363D",
+				boxShadow: selected
+					? `0 0 0 2px ${tokens.accent}33`
+					: "0 4px 12px rgba(0,0,0,0.05)",
+			}}
+			className="w-80 relative rounded-lg border p-3 text-xs font-sans transition-all"
 		>
 			<Handle
 				type="target"
-				position={Position.Top}
-				className="w-2.5 h-2.5 bg-purple-400 border-2 border-slate-950"
+				position={Position.Left}
+				style={{
+					top: "50%",
+					backgroundColor: "#A371F7",
+				}}
+				className="w-2.5 h-2.5 border-2 border-white dark:border-slate-900 -left-1.5 -translate-y-1/2"
 			/>
 
-			<div className="flex items-center justify-between pb-2 border-b border-slate-800">
+			{/* Header */}
+			<div
+				className={`flex items-center justify-between pb-2 border-b ${
+					isLight ? "border-stone-100" : "border-gray-800"
+				}`}
+			>
 				<div className="flex items-center space-x-2">
-					<div className="p-1.5 rounded-lg bg-purple-950/80 border border-purple-700/50">
-						<PieChart className="w-4 h-4 text-purple-400" />
+					<div
+						className={`p-1 rounded ${
+							isLight
+								? "bg-purple-50 text-purple-600"
+								: "bg-purple-950 text-purple-400"
+						}`}
+					>
+						<PieChart className="w-3.5 h-3.5" />
 					</div>
 					<div>
-						<div className="text-xs font-bold text-slate-100">
-							{data.label || "BI Chart Visualizer"}
+						<div
+							className={`font-semibold ${
+								isLight ? "text-stone-800" : "text-slate-100"
+							}`}
+						>
+							{data.label || "BI Chart"}
 						</div>
-						<div className="text-[10px] text-purple-400 font-mono">
-							BI Output
+						<div
+							className={`text-[9px] font-mono ${
+								isLight ? "text-stone-400" : "text-slate-500"
+							}`}
+						>
+							VIZ_CHART
 						</div>
 					</div>
 				</div>
 				<button
 					onClick={renderChart}
-					className="p-1 hover:bg-slate-800 rounded text-slate-400 hover:text-purple-400"
+					className={`p-1 rounded ${
+						isLight
+							? "hover:bg-stone-100 text-stone-400"
+							: "hover:bg-slate-800 text-slate-500"
+					}`}
 				>
 					<RefreshCw
-						className={`w-3.5 h-3.5 ${loading ? "animate-spin" : ""}`}
+						className={`w-3.5 h-3.5 ${
+							loading ? "animate-spin" : ""
+						}`}
 					/>
 				</button>
 			</div>
 
-			{/* 簡易長條圖動態渲染 */}
-			<div className="py-2 space-y-1.5">
-				{chartData.length > 0 ? (
-					<div className="space-y-1 bg-slate-950 p-2 rounded border border-slate-800">
-						{chartData.slice(0, 4).map((row, idx) => {
-							const keys = Object.keys(row);
-							const label = row[keys[0]];
-							const val = Number(row[keys[1]] || 0);
-							return (
+			{/* 圖型 + 軸設定 */}
+			<div className="py-2 space-y-2">
+				<div className="flex space-x-1">
+					{(["BAR", "LINE", "PIE", "KPI"] as ChartType[]).map(
+						(t) => (
+							<button
+								key={t}
+								onClick={() => updateConfig({ chartType: t })}
+								title={t}
+								className={`flex-1 flex items-center justify-center p-1 rounded border text-[9px] font-bold ${
+									chartType === t
+										? isLight
+											? "bg-purple-50 text-purple-700 border-purple-300"
+											: "bg-purple-950 text-purple-300 border-purple-700"
+										: isLight
+											? "bg-white text-stone-400 border-stone-200"
+											: "bg-slate-950 text-slate-500 border-slate-800"
+								}`}
+							>
+								{t === "BAR" && (
+									<BarChart3 className="w-3 h-3 mr-0.5" />
+								)}
+								{t === "LINE" && (
+									<LineChart className="w-3 h-3 mr-0.5" />
+								)}
+								{t === "PIE" && (
+									<PieChart className="w-3 h-3 mr-0.5" />
+								)}
+								{t === "KPI" && (
+									<Gauge className="w-3 h-3 mr-0.5" />
+								)}
+								{t}
+							</button>
+						),
+					)}
+				</div>
+
+				<div className="grid grid-cols-2 gap-1">
+					<select
+						value={xAxis}
+						onChange={(e) =>
+							updateConfig({ xAxis: e.target.value })
+						}
+						style={{
+							backgroundColor: inputBg,
+							borderColor: inputBorder,
+							color: tokens.textPrimary,
+						}}
+						className="px-1 py-0.5 rounded border text-[10px] font-mono"
+					>
+						<option value="">X Axis…</option>
+						{chartData[0] &&
+							Object.keys(chartData[0]).map((k) => (
+								<option key={k} value={k}>
+									{k}
+								</option>
+							))}
+					</select>
+					<select
+						value={yAxis}
+						onChange={(e) =>
+							updateConfig({ yAxis: e.target.value })
+						}
+						style={{
+							backgroundColor: inputBg,
+							borderColor: inputBorder,
+							color: tokens.textPrimary,
+						}}
+						className="px-1 py-0.5 rounded border text-[10px] font-mono"
+					>
+						<option value="">Y Axis…</option>
+						{chartData[0] &&
+							Object.keys(chartData[0]).map((k) => (
+								<option key={k} value={k}>
+									{k}
+								</option>
+							))}
+					</select>
+				</div>
+
+				{/* 圖表渲染區 */}
+				<div
+					style={{
+						backgroundColor: isLight ? "#FDFBF7" : "#0D1117",
+						borderColor: tokens.border,
+					}}
+					className="rounded border p-2"
+				>
+					{chartData.length > 0 && xAxis && yAxis ? (
+						chartType === "KPI" ? (
+							<div className="text-center py-4">
 								<div
-									key={idx}
-									className="text-[10px]"
+									style={{ color: tokens.accent }}
+									className="text-3xl font-bold font-mono"
 								>
-									<div className="flex justify-between text-slate-400 mb-0.5">
-										<span>{String(label)}</span>
-										<span className="font-mono text-purple-300">
-											{val}
-										</span>
-									</div>
-									<div className="w-full bg-slate-800 h-1.5 rounded-full overflow-hidden">
-										<div
-											className="bg-purple-500 h-full transition-all"
-											style={{
-												width: `${Math.min(100, val / 20)}%`,
-											}}
-										/>
-									</div>
+									{values[0]?.toLocaleString() || "0"}
 								</div>
-							);
-						})}
-					</div>
-				) : (
-					<div className="text-[10px] text-slate-500 text-center py-4">
-						Connect upstream node to render BI chart
-					</div>
-				)}
+								<div
+									className={`text-[10px] font-mono mt-1 ${
+										isLight
+											? "text-stone-500"
+											: "text-slate-500"
+									}`}
+								>
+									{yAxis} (top row)
+								</div>
+							</div>
+						) : chartType === "PIE" ? (
+							<svg
+								viewBox="0 0 200 110"
+								className="w-full h-auto"
+							>
+								{labels.slice(0, 8).map((label, i) => {
+									const start =
+										values
+											.slice(0, i)
+											.reduce((a, b) => a + b, 0) /
+										total;
+									const end =
+										values
+											.slice(0, i + 1)
+											.reduce((a, b) => a + b, 0) /
+										total;
+									return (
+										<path
+											key={i}
+											d={piePath(
+												start * Math.PI * 2,
+												end * Math.PI * 2,
+												60,
+											)}
+											fill={
+												CHART_COLORS[
+													i % CHART_COLORS.length
+												]
+											}
+											stroke={
+												isLight ? "#FFFFFF" : "#0D1117"
+											}
+											strokeWidth="1"
+										/>
+									);
+								})}
+								<g
+									fontSize="6"
+									fill={isLight ? "#292524" : "#8B949E"}
+								>
+									{labels.slice(0, 5).map((label, i) => (
+										<text
+											key={i}
+											x={130}
+											y={14 + i * 14}
+										>
+											<rect
+												x={122}
+												y={i * 14 + 4}
+												width="6"
+												height="6"
+												fill={
+													CHART_COLORS[
+														i %
+															CHART_COLORS
+																.length
+													]
+												}
+											/>
+											{String(label).slice(0, 14)}
+										</text>
+									))}
+								</g>
+							</svg>
+						) : (
+							<svg
+								viewBox="0 0 280 110"
+								className="w-full h-auto"
+							>
+								{chartType === "BAR"
+									? values.slice(0, 10).map((v, i) => {
+											const h =
+												(v / maxVal) * 80;
+											return (
+												<g key={i}>
+													<rect
+														x={i * 26 + 6}
+														y={96 - h}
+														width="18"
+														height={h}
+														fill={
+															CHART_COLORS[
+																i %
+																	CHART_COLORS
+																		.length
+															]
+														}
+														rx="2"
+													/>
+													<text
+														x={i * 26 + 15}
+														y={106}
+														fontSize="6"
+														textAnchor="middle"
+														fill={
+															isLight
+																? "#78716C"
+																: "#8B949E"
+														}
+													>
+														{String(
+															labels[i] ?? "",
+														).slice(0, 6)}
+													</text>
+												</g>
+											);
+										})
+									: (() => {
+											const pts = values
+												.slice(0, 20)
+												.map((v, i) => {
+													const x = 4 + (i * 272) / 19;
+													const y = 96 - (v / maxVal) * 80;
+													return `${x},${y}`;
+												})
+												.join(" ");
+											return (
+												<g>
+													<polyline
+														points={pts}
+														fill="none"
+														stroke={tokens.accent}
+														strokeWidth="2"
+													/>
+													{values
+														.slice(0, 20)
+														.map((v, i) => {
+															const x =
+																4 +
+																(i * 272) / 19;
+															const y =
+																96 -
+																(v / maxVal) * 80;
+															return (
+																<circle
+																	key={i}
+																	cx={x}
+																	cy={y}
+																	r="2"
+																	fill={
+																		CHART_COLORS[
+																			i %
+																				CHART_COLORS
+																					.length
+																		]
+																	}
+																/>
+															);
+														})}
+												</g>
+											);
+										})()}
+							</svg>
+						)
+					) : (
+						<div
+							className={`text-center py-4 text-[10px] ${
+								isLight ? "text-stone-400" : "text-slate-500"
+							}`}
+						>
+							{loading
+								? "Loading data..."
+								: "Connect upstream node and run pipeline, then configure X/Y axis"}
+						</div>
+					)}
+				</div>
 			</div>
 		</div>
 	);

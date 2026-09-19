@@ -1,5 +1,6 @@
 import React from "react";
 import { BaseEdge, EdgeProps, getSmoothStepPath } from "@xyflow/react";
+import { useTheme } from "../../../theme/ThemeContext";
 
 export const ParticleEdge: React.FC<EdgeProps> = ({
 	id,
@@ -12,7 +13,8 @@ export const ParticleEdge: React.FC<EdgeProps> = ({
 	style = {},
 	markerEnd,
 }) => {
-	// 使用正交 90 度圓角折線算法（Alteryx 經典 Wire 模式）
+	const { tokens } = useTheme();
+
 	const [edgePath] = getSmoothStepPath({
 		sourceX,
 		sourceY,
@@ -20,37 +22,31 @@ export const ParticleEdge: React.FC<EdgeProps> = ({
 		targetX,
 		targetY,
 		targetPosition,
-		borderRadius: 16, // 圓角弧度
+		borderRadius: 12,
 	});
 
 	return (
 		<>
-			{/* 底部螢光發光軌道 */}
 			<path
 				d={edgePath}
 				fill="none"
-				stroke="#06b6d4"
-				strokeWidth={6}
-				strokeOpacity={0.2}
-				className="blur-[1px]"
+				stroke={tokens.edgeStroke}
+				strokeWidth={5}
+				strokeOpacity={0.15}
 			/>
-
-			{/* 高對比螢光青色主線 */}
 			<BaseEdge
 				id={id}
 				path={edgePath}
 				markerEnd={markerEnd}
 				style={{
-					strokeWidth: 2.5,
-					stroke: "#22d3ee",
+					strokeWidth: 2,
+					stroke: tokens.edgeStroke,
 					...style,
 				}}
 			/>
-
-			{/* 線條動態粒子 */}
 			<circle
-				r="3.5"
-				fill="#a5f3fc"
+				r="3"
+				fill={tokens.edgeStroke}
 			>
 				<animateMotion
 					dur="3s"

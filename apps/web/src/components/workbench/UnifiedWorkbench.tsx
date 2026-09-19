@@ -1,40 +1,82 @@
-import React, { useState } from "react";
+import React, { useCallback, useState } from "react";
 import {
 	Sparkles,
-	Layers,
 	Sliders,
-	PlaySquare,
-	Eye,
-	MessageSquare,
-	ChevronDown,
-	ChevronUp,
+	Sun,
+	Moon,
 } from "lucide-react";
-import { ExecutionViewMode, SynapseASTGraph } from "../../types/workbench";
-import { NymphCanvas } from "../nymph/NymphCanvas";
+import { ExecutionViewMode } from "../../types/workbench";
+import { NymphCanvas, InspectedNodePayload } from "../nymph/NymphCanvas";
 import { Palette } from "./Palette";
+import { DataDrawer } from "./DataDrawer";
 import { ikaros } from "../../engine/ikaros/client";
+import { ExecLogEntry } from "../../engine/scheduler";
+import { useTheme, ThemeProvider } from "../../theme/ThemeContext";
+import { Node, Edge } from "@xyflow/react";
 
-export const UnifiedWorkbench: React.FC = () => {
+/**
+ * Hermes 請求逾時（毫秒）。
+ * 舊版用裸 fetch 而且沒有 signal：後端連上但不回應時 isHermesBusy 永遠為 true，
+ * 輸入框與送出按鈕永久停用，只能重新載入頁面。
+ */
+const HERMES_TIMEOUT_MS = 30_000;
+
+const WorkbenchContent: React.FC = () => {
+	/**
+	 * Hermes 執行模式：
+	 *   CANVAS_FOCUS → 生成多節點 pipeline 落畫布（MUTATE_AST）
+	 *   SILENT       → 直接計算一條 SQL 並在 chat 回傳結果（INLINE_SQL）
+	 * 舊版這個值是硬寫死 "CANVAS_FOCUS"，令後端 INLINE_SQL 路徑永遠走不到。
+	 */
 	const [viewMode, setViewMode] = useState<ExecutionViewMode>("CANVAS_FOCUS");
 	const [isHermesOpen, setIsHermesOpen] = useState(true);
 	const [isDrawerOpen, setIsDrawerOpen] = useState(true);
+	const [inspectedPayload, setInspectedPayload] =
+		useState<InspectedNodePayload | null>(null);
+	const [canvasNodes, setCanvasNodes] = useState<Node[]>([]);
+	const [canvasEdges, setCanvasEdges] = useState<Edge[]>([]);
 	const [chatMessages, setChatMessages] = useState<
 		Array<{ sender: "user" | "hermes"; text: string; dataPreview?: any }>
 	>([
 		{
 			sender: "hermes",
-			text: "Hello! I am Hermes. I can generate DAG flows or run inline calculations for you.",
+			text: "Hello! I am Hermes. I can generate DAG flows or run inline calculations for you.\nExample: 「載入銷量數據，過濾 amount 大於 1000，再按 year 加總」",
 		},
 	]);
 	const [inputPrompt, setInputPrompt] = useState("");
+	const [isHermesBusy, setIsHermesBusy] = useState(false);
 
-	// 在 UnifiedWorkbench.tsx 中的 handleSendMessage 方法更新：
+	const { mode, setMode, tokens } = useTheme();
+
+	const handleCanvasStateChange = useCallback(
+		(nodes: Node[], edges: Edge[]) => {
+			setCanvasNodes(nodes);
+			setCanvasEdges(edges);
+		},
+		[],
+	);
+
+	// Run Pipeline 全畫布執行 → 將執行 Log 顯示在 Drawer
+	const handlePipelineLog = useCallback((logs: ExecLogEntry[]) => {
+		setInspectedPayload({
+			id: "pipeline",
+			label: "Pipeline Run",
+			nodeType: "PIPELINE",
+			sqlQuery: "",
+			// 全圖執行沒有單一輸出表 → Drawer 只顯示 Logs 分頁
+			tableName: "",
+			ok: logs.some((l) => l.level === "ERROR") ? false : true,
+			logs,
+		});
+	}, []);
+
 	const handleSendMessage = async (e: React.FormEvent) => {
 		e.preventDefault();
-		if (!inputPrompt.trim()) return;
+		if (!inputPrompt.trim() || isHermesBusy) return;
 
 		const userText = inputPrompt;
 		setInputPrompt("");
+		setIsHermesBusy(true);
 		setChatMessages((prev) => [
 			...prev,
 			{ sender: "user", text: userText },
@@ -46,14 +88,32 @@ export const UnifiedWorkbench: React.FC = () => {
 				{
 					method: "POST",
 					headers: { "Content-Type": "application/json" },
+					// 沒有這個 signal，後端 hang 住就會讓整個 chat 永久卡在 busy
+					signal: AbortSignal.timeout(HERMES_TIMEOUT_MS),
 					body: JSON.stringify({
 						prompt: userText,
 						execution_mode: viewMode,
-						current_dag: { nodes: [], edges: [] }, // 可帶入當前畫布節點
+						// 👉 真實畫布 DAG context（舊版永遠傳空陣列，AI 無從參考）
+						current_dag: {
+							nodes: canvasNodes.map((n) => ({
+								id: n.id,
+								label: (n.data as any).label,
+								type: (n.data as any).type,
+								config: (n.data as any).config,
+							})),
+							edges: canvasEdges.map((e) => ({
+								source: e.source,
+								target: e.target,
+								targetHandle: e.targetHandle,
+							})),
+						},
 					}),
 				},
 			);
 
+			if (!response.ok) {
+				throw new Error(`Hermes 回應 HTTP ${response.status}`);
+			}
 			const data = await response.json();
 
 			if (data.action_type === "INLINE_SQL" && data.sql_query) {
@@ -72,7 +132,9 @@ export const UnifiedWorkbench: React.FC = () => {
 						...prev,
 						{
 							sender: "hermes",
-							text: `${data.message}\n(SQL: ${data.sql_query})`,
+							text: `${data.message}\n(SQL 執行失敗: ${String(
+								(sqlErr as any)?.message || sqlErr,
+							).slice(0, 300)})`,
 						},
 					]);
 				}
@@ -81,94 +143,178 @@ export const UnifiedWorkbench: React.FC = () => {
 					...prev,
 					{ sender: "hermes", text: data.message },
 				]);
-				// 觸發畫布新增節點通知
 				window.dispatchEvent(
 					new CustomEvent("SYNAPSE_AST_PATCH", {
 						detail: data.ast_patch,
 					}),
 				);
+			} else {
+				setChatMessages((prev) => [
+					...prev,
+					{ sender: "hermes", text: data.message || "Done." },
+				]);
 			}
-		} catch (err) {
-			setChatMessages((prev) => [
-				...prev,
-				{ sender: "hermes", text: "Hermes Agent Connection Failed." },
-			]);
+		} catch (err: any) {
+			// 逾時與 HTTP 錯誤要分開講，否則使用者只看到一句「連線失敗」而無從判斷
+			const timedOut = err?.name === "TimeoutError";
+			const text = timedOut
+				? `Hermes 逾時：${HERMES_TIMEOUT_MS / 1000} 秒內沒有回應，已中止請求（可重試）。`
+				: String(err?.message || "").startsWith("Hermes 回應 HTTP")
+					? `${err.message} —— 請檢查後端日誌。`
+					: "Hermes Agent Connection Failed — is the FastAPI backend running on :8000?";
+			setChatMessages((prev) => [...prev, { sender: "hermes", text }]);
+		} finally {
+			setIsHermesBusy(false);
 		}
 	};
 
 	return (
-		<div className="w-screen h-screen flex flex-col bg-slate-950 text-slate-100 overflow-hidden font-sans">
-			{/* 頂部 Header & 模式切換器 */}
-			<header className="h-12 border-b border-slate-800 bg-slate-900/90 px-4 flex items-center justify-between z-20 shrink-0">
+		<div
+			style={{
+				backgroundColor: tokens.bgCanvas,
+				color: tokens.textPrimary,
+			}}
+			className="w-screen h-screen flex flex-col font-sans transition-colors duration-200"
+		>
+			{/* 頂部 Header */}
+			<header
+				style={{
+					backgroundColor: tokens.bgPanel,
+					borderColor: tokens.border,
+				}}
+				className="h-12 border-b px-4 flex items-center justify-between z-20 shrink-0"
+			>
 				<div className="flex items-center space-x-3">
-					<div className="font-extrabold text-cyan-400 tracking-wider text-sm flex items-center space-x-1.5">
-						<Sparkles className="w-4 h-4" />
-						<span>SYNAPSE WORKBENCH</span>
-					</div>
-					<span className="text-slate-600">|</span>
-					<span className="text-xs text-slate-400 font-mono">
-						v1.0 (Agent + Alteryx + BI)
+					<span className="font-bold font-mono tracking-tight text-sm">
+						SYNAPSE WORKBENCH
+					</span>
+					<span
+						style={{
+							backgroundColor: `${tokens.accent}15`,
+							color: tokens.accent,
+							borderColor: `${tokens.accent}30`,
+						}}
+						className="text-[10px] font-mono px-2 py-0.5 rounded border font-semibold"
+					>
+						{mode === "claude-light"
+							? "Claude Light Theme"
+							: "GitHub Dark Theme"}
 					</span>
 				</div>
 
-				{/* View Mode Toggle Switch */}
-				<div className="flex items-center bg-slate-950 border border-slate-800 rounded-lg p-1 space-x-1 text-xs">
+				{/* 主題切換按鈕 */}
+				<div className="flex items-center space-x-2">
 					<button
-						onClick={() => setViewMode("SILENT")}
-						className={`flex items-center space-x-1.5 px-3 py-1 rounded-md transition-all ${
-							viewMode === "SILENT"
-								? "bg-cyan-500/20 text-cyan-300 font-bold border border-cyan-500/40"
-								: "text-slate-400 hover:text-slate-200"
-						}`}
+						onClick={() =>
+							setMode(
+								mode === "claude-light"
+									? "github-dark"
+									: "claude-light",
+							)
+						}
+						style={{
+							backgroundColor: tokens.bgCard,
+							borderColor: tokens.border,
+							color: tokens.textPrimary,
+						}}
+						className="flex items-center space-x-2 px-3 py-1.5 text-xs rounded border shadow-sm hover:opacity-80 transition-all font-medium"
 					>
-						<MessageSquare className="w-3.5 h-3.5" />
-						<span>1) Silent Result Mode</span>
-					</button>
-					<button
-						onClick={() => setViewMode("CANVAS_FOCUS")}
-						className={`flex items-center space-x-1.5 px-3 py-1 rounded-md transition-all ${
-							viewMode === "CANVAS_FOCUS"
-								? "bg-cyan-500/20 text-cyan-300 font-bold border border-cyan-500/40"
-								: "text-slate-400 hover:text-slate-200"
-						}`}
-					>
-						<Eye className="w-3.5 h-3.5" />
-						<span>2) Canvas Focus Mode</span>
+						{mode === "claude-light" ? (
+							<>
+								<Moon className="w-3.5 h-3.5" />
+								<span>GitHub Dark</span>
+							</>
+						) : (
+							<>
+								<Sun className="w-3.5 h-3.5 text-amber-500" />
+								<span>Claude Light</span>
+							</>
+						)}
 					</button>
 				</div>
-
-				<button className="flex items-center space-x-1 bg-green-500/20 hover:bg-green-500/30 text-green-400 border border-green-500/40 text-xs px-3 py-1.5 rounded-lg transition-all font-bold">
-					<PlaySquare className="w-4 h-4" />
-					<span>Run Pipeline</span>
-				</button>
 			</header>
 
-			{/* 主工作空間：左側 Palette + 中央 Canvas + 右側 Hermes Agent */}
+			{/* 主工作空間 */}
 			<div className="flex-1 flex relative overflow-hidden">
-				{/* 左側 Alteryx Tool Palette */}
 				<Palette />
 
-				{/* 中央 Canvas 區域 */}
-				<main className="flex-1 relative bg-slate-950">
-					<NymphCanvas />
+				<main className="flex-1 relative">
+					<NymphCanvas
+						onInspectNode={setInspectedPayload}
+						onPipelineLog={handlePipelineLog}
+						onCanvasStateChange={handleCanvasStateChange}
+					/>
 				</main>
 
-				{/* 右側 Hermes Chat Side-Panel */}
+				{/* 右側 Hermes Chat */}
 				<aside
-					className={`border-l border-slate-800 bg-slate-900/90 backdrop-blur flex flex-col transition-all duration-300 z-10 ${
-						isHermesOpen ? "w-96" : "w-12"
+					style={{
+						backgroundColor: tokens.bgPanel,
+						borderColor: tokens.border,
+					}}
+					className={`border-l flex flex-col transition-all duration-300 z-10 ${
+						isHermesOpen ? "w-96" : "w-10"
 					}`}
 				>
-					<div className="h-10 border-b border-slate-800 px-3 flex items-center justify-between bg-slate-900 shrink-0">
+					<div
+						style={{ borderColor: tokens.border }}
+						className="h-10 border-b px-3 flex items-center justify-between shrink-0"
+					>
 						{isHermesOpen && (
-							<div className="flex items-center space-x-2 text-xs font-bold text-cyan-300">
-								<Sparkles className="w-4 h-4 text-cyan-400 animate-pulse" />
+							<div
+								style={{ color: tokens.accent }}
+								className="flex items-center space-x-2 text-xs font-bold"
+							>
+								<Sparkles className="w-4 h-4 animate-pulse" />
 								<span>Hermes AI Copilot</span>
+							</div>
+						)}
+						{isHermesOpen && (
+							<div
+								className="flex rounded border overflow-hidden text-[9px] font-mono"
+								style={{ borderColor: tokens.border }}
+							>
+								<button
+									onClick={() => setViewMode("CANVAS_FOCUS")}
+									title="生成多節點 pipeline 落畫布"
+									style={{
+										backgroundColor:
+											viewMode === "CANVAS_FOCUS"
+												? `${tokens.accent}22`
+												: tokens.bgCard,
+										color:
+											viewMode === "CANVAS_FOCUS"
+												? tokens.accent
+												: tokens.textSecondary,
+									}}
+									className="px-2 py-1 font-bold"
+								>
+									PIPELINE
+								</button>
+								<button
+									onClick={() => setViewMode("SILENT")}
+									title="直接執行一條 SQL 並回傳結果"
+									style={{
+										backgroundColor:
+											viewMode === "SILENT"
+												? `${tokens.accent}22`
+												: tokens.bgCard,
+										color:
+											viewMode === "SILENT"
+												? tokens.accent
+												: tokens.textSecondary,
+										borderColor: tokens.border,
+									}}
+									className="px-2 py-1 font-bold border-l"
+								>
+									INLINE
+								</button>
 							</div>
 						)}
 						<button
 							onClick={() => setIsHermesOpen(!isHermesOpen)}
-							className="text-slate-400 hover:text-slate-200 p-1 rounded"
+							style={{ color: tokens.textSecondary }}
+							className="p-1 rounded hover:opacity-80"
 						>
 							{isHermesOpen ? "➔" : "⬅"}
 						</button>
@@ -176,38 +322,129 @@ export const UnifiedWorkbench: React.FC = () => {
 
 					{isHermesOpen && (
 						<div className="flex-1 flex flex-col justify-between p-3 overflow-hidden">
-							{/* Message Stream */}
 							<div className="flex-1 overflow-y-auto space-y-3 pr-1 text-xs">
 								{chatMessages.map((msg, idx) => (
 									<div
 										key={idx}
-										className={`p-3 rounded-lg max-w-[90%] ${
-											msg.sender === "user"
-												? "bg-cyan-600/20 border border-cyan-500/40 text-cyan-100 ml-auto"
-												: "bg-slate-800/80 border border-slate-700/80 text-slate-200"
-										}`}
+										style={{
+											backgroundColor:
+												msg.sender === "user"
+													? `${tokens.accent}15`
+													: tokens.bgCard,
+											borderColor:
+												msg.sender === "user"
+													? `${tokens.accent}40`
+													: tokens.border,
+											color: tokens.textPrimary,
+										}}
+										className="p-3 rounded-lg border max-w-[90%]"
 									>
-										<p>{msg.text}</p>
-										{/* Silent Mode Inline Result Render */}
+										<p className="whitespace-pre-wrap">{msg.text}</p>
 										{msg.dataPreview && (
-											<div className="mt-2 bg-slate-950 p-2 rounded border border-slate-800 overflow-x-auto">
-												<div className="text-[10px] text-cyan-400 font-mono mb-1">
-													⚡ Query Output:
+											<div
+												style={{
+													backgroundColor:
+														tokens.bgCanvas,
+													borderColor: tokens.border,
+												}}
+												className="mt-2 p-2 rounded border overflow-auto max-h-48"
+											>
+												<div
+													style={{
+														color: tokens.accent,
+													}}
+													className="text-[10px] font-mono mb-1"
+												>
+													⚡ Query Output:{" "}
+													{msg.dataPreview.length} rows
 												</div>
-												<pre className="text-[10px] text-slate-300">
-													{JSON.stringify(
-														msg.dataPreview,
-														null,
-														2,
-													)}
-												</pre>
+												<table className="w-full text-left text-[10px] font-mono">
+													<thead>
+														<tr>
+															{Object.keys(
+																msg.dataPreview[0] ||
+																	{},
+															)
+																.slice(0, 6)
+																.map((col) => (
+																	<th
+																		key={col}
+																		className="pb-1 pr-2"
+																		style={{
+																			color: tokens.accent,
+																		}}
+																	>
+																		{col}
+																	</th>
+																))}
+														</tr>
+													</thead>
+													<tbody>
+														{msg.dataPreview
+																													.slice(0, 20)
+																													.map(
+																														(
+																															row: Record<
+																																string,
+																																any
+																															>,
+																															rIdx: number,
+																														) => (
+																	<tr
+																		key={
+																			rIdx
+																		}
+																	>
+																		{Object.keys(
+																			msg
+																				.dataPreview[0] ||
+																				{},
+																		)
+																			.slice(
+																				0,
+																				6,
+																			)
+																			.map(
+																				(
+																					col,
+																				) => (
+																					<td
+																						key={
+																							col
+																						}
+																						className="py-0.5 pr-2 truncate max-w-[80px]"
+																					>
+																						{String(
+																							row[
+																								col
+																							],
+																						)}
+																					</td>
+																				),
+																			)}
+																	</tr>
+																),
+															)}
+													</tbody>
+												</table>
 											</div>
 										)}
 									</div>
 								))}
+								{isHermesBusy && (
+									<div
+										style={{
+											backgroundColor: tokens.bgCard,
+											borderColor: tokens.border,
+											color: tokens.textSecondary,
+										}}
+										className="p-3 rounded-lg border text-[10px] font-mono"
+									>
+										🤖 Hermes is thinking...
+									</div>
+								)}
 							</div>
 
-							{/* Chat Input */}
 							<form
 								onSubmit={handleSendMessage}
 								className="mt-3 flex items-center space-x-2 shrink-0"
@@ -219,15 +456,25 @@ export const UnifiedWorkbench: React.FC = () => {
 										setInputPrompt(e.target.value)
 									}
 									placeholder={
-										viewMode === "SILENT"
-											? "Ask Hermes to calculate silently..."
-											: "Ask Hermes to modify canvas workflow..."
+										viewMode === "CANVAS_FOCUS"
+											? "Describe a pipeline to build on the canvas…"
+											: "Ask for an inline calculation…"
 									}
-									className="flex-1 bg-slate-950 border border-slate-800 focus:border-cyan-500 rounded-lg p-2.5 text-xs text-slate-100 placeholder-slate-500 focus:outline-none transition-colors"
+									style={{
+										backgroundColor: tokens.bgCard,
+										borderColor: tokens.border,
+										color: tokens.textPrimary,
+									}}
+									className="flex-1 border rounded-lg p-2.5 text-xs focus:outline-none"
 								/>
 								<button
 									type="submit"
-									className="bg-cyan-500/20 hover:bg-cyan-500/40 text-cyan-300 border border-cyan-500/50 p-2.5 rounded-lg transition-colors shrink-0"
+									disabled={isHermesBusy}
+									style={{
+										backgroundColor: tokens.accent,
+										color: "#FFFFFF",
+									}}
+									className="p-2.5 rounded-lg font-bold text-xs shrink-0 shadow disabled:opacity-50"
 								>
 									➔
 								</button>
@@ -237,33 +484,18 @@ export const UnifiedWorkbench: React.FC = () => {
 				</aside>
 			</div>
 
-			{/* 底層 Ikaros Data Drawer (可收折數據抽屜) */}
-			<footer
-				className={`border-t border-slate-800 bg-slate-900 transition-all ${isDrawerOpen ? "h-40" : "h-8"}`}
-			>
-				<div
-					onClick={() => setIsDrawerOpen(!isDrawerOpen)}
-					className="h-8 bg-slate-950 px-4 flex items-center justify-between cursor-pointer border-b border-slate-800 hover:bg-slate-900 transition-colors"
-				>
-					<div className="flex items-center space-x-2 text-xs font-mono text-slate-400">
-						<Sliders className="w-3.5 h-3.5 text-cyan-400" />
-						<span>Ikaros Data Drawer & Execution Logs</span>
-					</div>
-					{isDrawerOpen ? (
-						<ChevronDown className="w-4 h-4 text-slate-400" />
-					) : (
-						<ChevronUp className="w-4 h-4 text-slate-400" />
-					)}
-				</div>
-				{isDrawerOpen && (
-					<div className="p-3 text-xs font-mono text-slate-300 overflow-auto h-32">
-						<div className="text-slate-500">
-							// Select a node on canvas to inspect active Arrow
-							Data Stream or DuckDB log...
-						</div>
-					</div>
-				)}
-			</footer>
+			{/* 底部 Data Drawer（已真正接駁節點 Inspect / Pipeline Log） */}
+			<DataDrawer
+				isOpen={isDrawerOpen}
+				onToggle={() => setIsDrawerOpen(!isDrawerOpen)}
+				payload={inspectedPayload}
+			/>
 		</div>
 	);
 };
+
+export const UnifiedWorkbench: React.FC = () => (
+	<ThemeProvider>
+		<WorkbenchContent />
+	</ThemeProvider>
+);

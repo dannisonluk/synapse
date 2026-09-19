@@ -1,96 +1,150 @@
 import React from "react";
-import { Layers, Database, Filter, Sigma, GitMerge, Calculator } from "lucide-react";
+import {
+	Database,
+	Filter,
+	Sigma,
+	GitMerge,
+	Calculator,
+	PieChart,
+	ArrowDownUp,
+	Table,
+	Combine,
+	Rows3,
+	CaseSensitive,
+	CopyCheck,
+	Droplets,
+	Sparkles,
+	Scissors,
+	MoveVertical,
+	TrendingUp,
+	ListOrdered,
+	TableProperties,
+	FlipVertical2,
+	Columns3,
+	Replace,
+	type LucideIcon,
+} from "lucide-react";
+import { useTheme } from "../../theme/ThemeContext";
+import { catalogByCategory, defaultConfigFor, type NodeSpec } from "../../engine/nodeCatalog";
+import type { AlteryxNodeType } from "../../types/workbench";
+
+/**
+ * 工具面板。
+ *
+ * 這裡**不再手寫節點清單** —— 舊版是一個手工維護的 items 陣列，與
+ * astCompiler 的 switch 各寫一份，於是新增節點時很容易只改一邊
+ * （hermes.py 就是這樣爛掉的）。現在面板完全由 engine/nodeCatalog.ts 生成，
+ * 而 nodeCatalog 又有斷言強制與編譯器一致。
+ *
+ * 注意：這裡**不會**帶 SQL —— 拖放至畫布之後，節點 SQL 一律由
+ * engine/astCompiler.generateSqlFromConfig() 依 `type` + `config` 生成。
+ */
+
+/** icon 名稱 → lucide 元件。名稱來自 nodeCatalog，缺漏會由斷言抓出來。 */
+const ICONS: Record<string, LucideIcon> = {
+	Database,
+	Filter,
+	Calculator,
+	Table,
+	ArrowDownUp,
+	CaseSensitive,
+	Rows3,
+	CopyCheck,
+	Droplets,
+	Sparkles,
+	Scissors,
+	MoveVertical,
+	TrendingUp,
+	ListOrdered,
+	Sigma,
+	TableProperties,
+	FlipVertical2,
+	GitMerge,
+	Combine,
+	Columns3,
+	Replace,
+	PieChart,
+};
+
+/** 供驗證腳本斷言「目錄用到的 icon 名稱這裡都有」 */
+export const PALETTE_ICON_NAMES = Object.keys(ICONS);
+
+interface PaletteItem {
+	type: AlteryxNodeType;
+	nodeType: "alteryxNode" | "vizChartNode";
+	label: string;
+	category: string;
+	config: Record<string, unknown>;
+}
+
+/** 目錄 → 可拖放的 payload（不含 React 元素，才能 JSON 序列化） */
+function toItem(spec: NodeSpec): PaletteItem {
+	return {
+		type: spec.type,
+		nodeType: spec.nodeType,
+		label: spec.label,
+		category: spec.category,
+		config: defaultConfigFor(spec.type),
+	};
+}
 
 export const Palette: React.FC = () => {
-	const onDragStart = (event: React.DragEvent, item: any) => {
-		const payload = {
-			nodeType: "alteryxNode", // 綁定視覺化 Alteryx 組件
-			type: item.type,
-			label: item.label,
-			category: item.category,
-			defaultSql: item.defaultSql,
-			config: item.config,
-		};
+	const { tokens } = useTheme();
 
-		event.dataTransfer.setData("application/json", JSON.stringify(payload));
+	const onDragStart = (event: React.DragEvent, item: PaletteItem) => {
+		event.dataTransfer.setData("text/plain", JSON.stringify(item));
 		event.dataTransfer.effectAllowed = "move";
 	};
 
-	const items = [
-		{
-			type: "INPUT_DUCKDB",
-			label: "Input Data",
-			category: "In/Out",
-			icon: <Database className="w-4 h-4 text-emerald-400" />,
-			defaultSql:
-				"CREATE TEMP TABLE raw_data AS SELECT 2026 AS year, 1500 AS amount, 1 AS user_id;",
-			config: { tableName: "raw_data" },
-		},
-		{
-			type: "FILTER",
-			label: "Filter",
-			category: "Preparation",
-			icon: <Filter className="w-4 h-4 text-blue-400" />,
-			defaultSql:
-				"CREATE TEMP TABLE filtered_data AS SELECT * FROM raw_data WHERE amount > 1000;",
-			config: { field: "amount", op: ">", val: "1000" },
-		},
-		{
-			type: "SUMMARIZE",
-			label: "Summarize",
-			category: "Transform",
-			icon: <Sigma className="w-4 h-4 text-amber-400" />,
-			defaultSql:
-				"SELECT year, SUM(amount) AS total_amount FROM filtered_data GROUP BY year;",
-			config: { groupBy: "year", func: "SUM", target: "amount" },
-		},
-		{
-			type: "JOIN",
-			label: "Join",
-			category: "Join",
-			icon: <GitMerge className="w-4 h-4 text-purple-400" />,
-			defaultSql:
-				"SELECT a.*, b.* FROM table_a a JOIN table_b b ON a.id = b.id;",
-			config: { joinType: "INNER", key: "id" },
-		},
-		{
-			type: "FORMULA",
-			label: "Formula",
-			category: "Preparation",
-			icon: <Calculator className="w-4 h-4 text-teal-400" />,
-			defaultSql:
-				"CREATE TEMP TABLE formula_data AS SELECT *, (amount * 1.1) AS amount_taxed FROM raw_data;",
-			config: {
-				outputColumn: "amount_taxed",
-				expression: "amount * 1.1",
-			},
-		},
-	];
-
 	return (
-		<aside className="w-60 border-r border-slate-800 bg-slate-900/60 backdrop-blur p-3 flex flex-col space-y-3 z-10 shrink-0 select-none">
-			<div className="text-xs font-bold text-slate-400 uppercase tracking-wider flex items-center space-x-1.5">
-				<Layers className="w-3.5 h-3.5 text-cyan-400" />
-				<span>Alteryx Tool Palette</span>
+		<aside
+			style={{
+				backgroundColor: tokens.bgPanel,
+				borderColor: tokens.border,
+				color: tokens.textPrimary,
+			}}
+			className="w-56 border-r p-3 flex flex-col space-y-3 shrink-0 z-10 transition-colors duration-200 select-none overflow-y-auto"
+		>
+			<div className="text-[10px] font-mono font-bold uppercase tracking-wider opacity-60">
+				Alteryx Tool Palette
 			</div>
-			<div className="space-y-2 text-xs">
-				{items.map((item) => (
-					<div
-						key={item.type}
-						draggable
-						onDragStart={(e) => onDragStart(e, item)}
-						className="p-2.5 bg-slate-800/60 hover:bg-slate-800 hover:border-cyan-500/50 border border-slate-700/60 rounded-lg cursor-grab active:cursor-grabbing flex items-center justify-between text-slate-200 transition-all shadow-sm"
-					>
-						<div className="flex items-center space-x-2">
-							{item.icon}
-							<span className="font-medium">{item.label}</span>
-						</div>
-						<span className="text-[10px] bg-slate-700/80 px-1.5 py-0.5 rounded text-slate-400">
-							{item.category}
-						</span>
+
+			{catalogByCategory().map((group) => (
+				<div key={group.category} className="space-y-2">
+					<div className="text-[9px] font-mono uppercase tracking-wider opacity-40 pt-1">
+						{group.category}
 					</div>
-				))}
-			</div>
+					{group.specs.map((spec) => {
+						const item = toItem(spec);
+						const Icon = ICONS[spec.icon] ?? Table;
+						return (
+							<div
+								key={spec.type}
+								draggable
+								onDragStart={(e) => onDragStart(e, item)}
+								title={`${spec.description}\n\n適用時機：${spec.whenToUse}`}
+								style={{
+									backgroundColor: tokens.bgCard,
+									borderColor: tokens.border,
+								}}
+								className="p-2.5 rounded-lg border flex items-center space-x-2.5 cursor-grab hover:shadow-md transition-all active:cursor-grabbing"
+							>
+								<div className="p-1 rounded bg-stone-500/10 shrink-0">
+									<Icon className={`w-4 h-4 ${spec.color}`} />
+								</div>
+								<div className="min-w-0">
+									<div className="text-xs font-semibold truncate">
+										{spec.label}
+									</div>
+									<div className="text-[9px] font-mono opacity-50 truncate">
+										{spec.type}
+									</div>
+								</div>
+							</div>
+						);
+					})}
+				</div>
+			))}
 		</aside>
 	);
 };
