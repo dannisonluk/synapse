@@ -1,173 +1,224 @@
 # Synapse: Web-Based Visual Data Engineering Platform
-## Technical Architecture & System Specification (v1.0 MVP)
+## Technical Architecture & System Specification (v1.2)
 
 ---
 
 ## 1. Executive Summary
 
-**Synapse** is a modern, client-side visual data engineering platform. By combining an in-browser WebAssembly database (**DuckDB-WASM**), a React Flow canvas (**Nymph**), and a dual-agent AI engine (**Daedalus** & **Chaos**), Synapse delivers a complete end-to-end data pipeline loop: turning natural language prompts into DAG topology, executing memory-native queries with zero network latency, and automatically repairing runtime exceptions.
+**Synapse** is a modern, client-side visual data engineering platform. By combining an in-browser WebAssembly database (**DuckDB-WASM**) running inside a dedicated **Web Worker** (**Ikaros**), a React Flow canvas (**Nymph**), and an LLM agent layer (**Hermes**, plus the standalone **Daedalus** / **Chaos** endpoints), Synapse delivers a complete end-to-end data pipeline loop: turning natural language prompts into DAG topology, executing memory-native queries without backend roundtrips, and automatically repairing runtime exceptions.
 
 ### Core Value Proposition
-* **Zero-Latency In-Browser Compute**: Runs DuckDB-WASM inside background Web Workers, paired with Apache Arrow IPC stream zero-copy transfer for high-performance memory analysis without backend roundtrips.
-* **Text-to-DAG Architecture**: Daedalus Agent parses natural language requests into multi-stage ETL nodes and auto-spaces coordinates.
-* **Self-Correction Loop**: Chaos Agent intercepts runtime SQL errors (e.g., missing tables, syntax issues), generates mock data or SQL fixes, and resumes pipeline execution seamlessly.
+* **In-browser compute, off the main thread**: DuckDB-WASM is hosted inside a dedicated Web Worker. CSV/Parquet parsing, SQL execution and result materialisation all happen there, so the UI stays responsive on million-row files.
+* **Bounded result transfer**: only bounded result sets (≤ `DEFAULT_MAX_ROWS`, or one page of 100 rows) ever cross the worker boundary. The Data Drawer pages and searches *in SQL* rather than in JavaScript.
+* **Text-to-DAG**: Hermes parses natural-language requests into multi-node pipelines, which the canvas resolves into real nodes and edges and then auto-lays-out. The set of tools Hermes may emit is **generated from the same catalogue the compiler and palette use** (§3.7), so the agent and the engine can never disagree about what exists.
+* **Self-correction loop**: runtime SQL errors are posted to the Chaos Agent, which returns a repaired query that is re-executed automatically.
 
 ---
 
 ## 2. System Architecture Overview
 
-Synapse operates on a decoupled architecture: a React monorepo for UI and local WASM execution, paired with a Python/FastAPI backend dedicated to LLM agent state machines.
-
 | Layer | Subsystem / Module | Technology Stack | Primary Responsibility |
 | :--- | :--- | :--- | :--- |
-| **UI / Canvas** | Nymph Canvas Engine | React 18, React Flow (`@xyflow/react`), Tailwind CSS | Visual DAG canvas, custom node/edge rendering, dynamic auto-offsetting, and `fitView` focus. |
-| **In-Browser Compute** | Ikaros Engine & Arrow IPC | DuckDB-WASM, Apache Arrow IPC, Web Worker | Web Worker lifecycle, in-memory SQL execution, zero-copy Arrow stream serialization, BigInt safety normalization. |
-| **AI Architect Agent** | Daedalus Agent | FastAPI, LangChain, NVIDIA Nemotron 3.5 Lightning | Natural language Text-to-DAG translation, multi-stage ETL breakdown, and JSON topology generation. |
-| **Self-Correction Agent** | Chaos Agent | FastAPI, LangChain, OpenRouter API | Runtime exception interception, schema gap analysis, inline `VALUES` mock data injection, and SQL repair. |
-| **Orchestration** | Topological Scheduler | TypeScript (Kahn's Algorithm) | DAG dependency resolution, topological sorting, and sequential upstream-to-downstream execution. |
+| **UI / Canvas** | Nymph Canvas Engine | React 18, React Flow (`@xyflow/react`), Tailwind CSS | Visual DAG canvas, custom node/edge rendering, drag & drop, auto-layout, viewport focus. |
+| **In-Browser Compute** | Ikaros Engine | DuckDB-WASM, Web Worker, `@synapse/ikaros-arrow` | Worker lifecycle, in-memory SQL execution, file registration, result materialisation, BigInt normalisation. |
+| **AI Copilot** | Hermes Agent | FastAPI, LangChain, OpenRouter | Text-to-pipeline (`MUTATE_AST`) and inline calculation (`INLINE_SQL`). Its tool vocabulary and prompt schema are generated from the TypeScript node catalogue (`node_catalog.json`). |
+| **AI Architect** | Daedalus Agent | FastAPI, LangChain, OpenRouter | Standalone Text-to-DAG endpoint (`/api/v1/daedalus/generate`). Not currently called by the UI. |
+| **Self-Correction** | Chaos Agent | FastAPI, LangChain, OpenRouter | Runtime exception interception and SQL repair. |
+| **Orchestration** | Topological Scheduler | TypeScript (Kahn's Algorithm) | Dependency resolution, subgraph extraction, topological ordering, failure propagation. |
 
 ---
 
 ## 3. Subsystem Specifications
 
-### 3.1 Nymph Canvas Engine (Frontend Canvas)
-* **Custom `SqlNode`**: Features SQL preview, execution status indicators (`IDLE`, `RUNNING`, `SUCCESS`, `ERROR`), and manual trigger buttons.
-* **`ParticleEdge`**: Custom animated edges representing dynamic stream flow from upstream output to downstream input.
-* **Dynamic Auto-Offsetting**: Calculates the maximum Y-coordinate on the current canvas to position newly generated DAGs at a safe offset (`baseOffsetY = maxY + 200px`), preventing card overlaps.
-* **Smooth Viewport Focus**: Calls `fitView({ duration: 800, padding: 0.2 })` upon topology generation to smoothly re-center all nodes within the viewport.
+### 3.1 Nymph Canvas Engine
+* **`SqlNode` / `AlteryxNode` / `VizChartNode`**: three renderers. `AlteryxNode` covers all **22** node types with per-type config forms and single/double/multi handle layouts (JOIN / APPEND_FIELDS / FIND_REPLACE expose `left` / `right`; FILTER exposes `true` / `false`; UNION accepts any number of inputs). Field inputs are `<datalist>`-backed, so they offer the real upstream column names without giving up free text. The list of types, their labels, their config fields and their defaults is **not** hand-written here — it comes from `engine/nodeCatalog.ts` (see §3.7).
+* **`ParticleEdge`**: animated flow edge driven by an SVG `animateMotion` particle, fully theme-aware.
+* **Auto-layout**: `@dagrejs/dagre` with `rankdir: LR` (Alteryx-style) or `TB`, followed by `fitView`.
+* **Node identity**: ids come from `crypto.getRandomValues` (6 bytes → `node_<12 hex>`). The previous `Date.now().slice(-4)` scheme collided every ~10 seconds.
+* **Palette**: 22 tools in five categories, **generated** from the catalogue (`catalogByCategory()`) rather than listed by hand — adding a node type to `nodeCatalog.ts` makes it draggable automatically, and a test asserts that every catalogue icon actually exists in the installed `lucide-react`. The palette deliberately carries **no SQL** — a dropped node's query is always generated by `astCompiler.generateSqlFromConfig()` from its `type` + `config`, so the SQL preview can never disagree with the config form.
 
-### 3.2 Ikaros Execution Engine (WASM & Arrow Data Layer)
-Ikaros runs DuckDB in a dedicated Web Worker thread. Data transfer between the worker and the main UI thread utilizes Apache Arrow IPC streams for zero-copy memory exchange.
+### 3.1.1 FILTER branching (true / false)
 
-```typescript
-// Worker Arrow IPC Stream Response Handling (worker.ts)
-import * as duckdb from "@duckdb/duckdb-wasm";
-import { tableToIPC } from "apache-arrow";
+`FILTER` follows Alteryx semantics and produces **two** output tables, both created by the one node:
 
-self.onmessage = async (e: MessageEvent) => {
-  const { id, type, payload } = e.data;
-  if (type === "EXECUTE_SQL") {
-    const arrowTable = await conn.query(payload.sql);
-    // Serialize Arrow Table to Binary IPC Stream
-    const ipcBuffer = tableToIPC(arrowTable as any, "stream");
-    self.postMessage({ id, type: "SUCCESS", result: ipcBuffer });
-  }
-};
-```
+| Port | Table | Contents |
+| :--- | :--- | :--- |
+| `true` | `<nodeId>` (the node's own id) | rows where the condition is TRUE |
+| `false` | `<nodeId>__false` | every other row |
 
-#### BigInt Safe Serialization
-To prevent `TypeError: Do not know how to serialize a BigInt` during UI state rendering, BigInt fields from DuckDB aggregations (`COUNT`, `SUM`) are converted dynamically:
+The `false` branch is compiled as `WHERE NOT COALESCE((<cond>), FALSE)`, **not** `WHERE NOT (<cond>)`. The naive form is wrong for NULL: `NOT NULL` is still NULL, so those rows satisfy neither branch and silently vanish. Verified against the shipped engine (duckdb-wasm 1.32.0 / DuckDB v1.4.3) — with `amount > 1000` over `[500, 1500, NULL, 1000, 2500]`, the branches are `true=[1500,2500]` / `false=[500,NULL,1000]`, exhaustive and disjoint.
 
-```typescript
-// Safe JSON Replacer for BigInt Serialization
-JSON.stringify(
-  queryResult, 
-  (key, value) => (typeof value === "bigint" ? Number(value) : value), 
-  2
-);
-```
+Which table a downstream node reads is decided by `sourceHandle` via `branchTableName()`. This is the fix for a defect where the `false` port was purely cosmetic: nothing read `sourceHandle`, so a node wired from `F` silently received the **passing** rows.
 
-### 3.3 Daedalus AI Architect (Text-to-DAG)
-Powered by `nvidia/nemotron-3.5-lightning:free` via OpenRouter. Daedalus splits complex requests into multi-stage pipelines and outputs structured JSON conforming to platform schemas.
+`FILTER` is the only node type that emits more than one statement; `compileNodeStatements()` returns the list, and the engine executes it in a single `query()` call (DuckDB's query path handles multi-statement strings — also verified against the shipped engine). The canvas passes `{falseBranch: false}` when nothing is wired to the `F` port, so the second table is only materialised when it is actually reachable.
 
-```json
-{
-  "dagId": "dag-7f3a9b2c",
-  "nodes": [
-    {
-      "id": "node-1",
-      "type": "SQL_CUSTOM",
-      "label": "1. Extract & Filter",
-      "position": { "x": 250, "y": 100 },
-      "data": {
-        "sqlQuery": "CREATE TEMP TABLE raw_data AS SELECT * FROM transactions WHERE year = 2026;"
-      }
-    },
-    {
-      "id": "node-2",
-      "type": "SQL_CUSTOM",
-      "label": "2. Aggregate Metrics",
-      "position": { "x": 250, "y": 280 },
-      "data": {
-        "sqlQuery": "SELECT COUNT(DISTINCT user_id) AS total_users FROM raw_data;"
-      }
-    }
-  ],
-  "edges": [
-    { "id": "edge-1-2", "source": "node-1", "target": "node-2", "animated": true }
-  ]
-}
-```
+**`JOIN` keeps both sides.** The projection is `SELECT a.*, b.*`; when the two tables share a column name, DuckDB suffixes the right-hand copy (`country` → `country_1`). The previous `SELECT a.*` dropped every right-table column silently.
+
+### 3.2 Ikaros Execution Engine (Web Worker + Arrow)
+
+Ikaros is split into five modules so that the worker and the fallback share one implementation:
+
+| File | Role |
+| :--- | :--- |
+| `engine/ikaros/bundles.ts` | Resolves DuckDB-WASM assets via Vite `?url` imports (bundled locally — no CDN dependency). |
+| `engine/ikaros/core.ts` | `IkarosCore` — host-agnostic DuckDB wrapper (`query`, `exec`, `describe`, `page`, `registerFile`, `tables`). |
+| `engine/ikaros/dispatch.ts` | `createCore()` + `dispatch(core, op, payload)` — the single request dispatcher. |
+| `engine/ikaros/worker.ts` | The real Web Worker: owns `IkarosCore`, replies to `{id, op, ...}` messages. |
+| `engine/ikaros/client.ts` | `IkarosEngine` RPC wrapper. Spawns the worker; falls back to the main thread if the worker cannot start. |
+
+**Result materialisation.** `arrowTableToJSON` (from `@synapse/ikaros-arrow`) converts DuckDB's Arrow table into plain rows **inside the worker**. The main thread therefore never touches WASM and never walks a large Arrow table. `DEFAULT_MAX_ROWS` (5000) caps a single `query`; `truncated` / `totalRows` are reported back.
+
+**Paging.** `ikaros.page(table, {offset, limit, search})` issues `COUNT(*)` plus a `LIMIT/OFFSET` select, with search compiled to a single `ILIKE` over `concat_ws` of all columns. Only one page (default 100 rows) crosses the boundary.
+
+**BigInt safety.** `arrowTableToJSON` coerces `bigint` to `Number`, preventing `TypeError: Do not know how to serialize a BigInt` during rendering. Note this loses precision above `Number.MAX_SAFE_INTEGER`.
+
+**Graceful degradation.** Nested dedicated workers (the DuckDB engine itself runs in its own worker, spawned from ours) are supported by all current evergreen browsers, but if the worker fails to boot the client transparently falls back to running `IkarosCore` on the main thread and surfaces the reason in the canvas badge (`⚡ Ikaros · Worker` vs `· Main Thread`).
+
+> **Note on Arrow IPC.** The worker boundary uses structured clone of bounded JSON rows, not an IPC byte stream. `serializeArrowTable` / `parseArrowBuffer` remain available in `@synapse/ikaros-arrow` for a future zero-copy path, but nothing uses them today — including the exporter, which emits SQL text. Moving to IPC would require pinning a single `apache-arrow` version across DuckDB-WASM (which bundles v17) and the app (v15) — deliberately avoided for now.
+
+### 3.3 Hermes AI Copilot
+
+`POST /api/v1/hermes/chat` accepts `{prompt, execution_mode, current_dag}` and returns one of three action types:
+
+| `execution_mode` | `action_type` | Behaviour |
+| :--- | :--- | :--- |
+| `CANVAS_FOCUS` | `MUTATE_AST` | Generates a multi-node pipeline (`nodes[]` + `edges[]`) which the canvas materialises and auto-lays-out. |
+| `SILENT` | `INLINE_SQL` | Generates a single read-only query which is executed immediately and previewed in the chat panel. |
+| any | `MESSAGE` | Plain text (e.g. the LLM is not configured). |
+
+Both modes are selectable in the UI (**PIPELINE** / **INLINE** toggle). The canvas DAG is sent as context on every turn, including each node's id, type, label and config, so the model can extend existing pipelines.
+
+**Robustness.** LLM output is parsed defensively: markdown fences are stripped, invalid node types are dropped, ids are normalised to `n0…nN`, and edges are rejected unless both endpoints resolve. If the LLM is unconfigured or returns unusable output, a deterministic keyword-driven fallback pipeline is generated instead — a **table-driven** one (`_FALLBACK_STEPS`), so the fallback understands the same 22 tools the compiler does (dedupe → clean → impute → split → filter → pivot → unpivot → rank → running total → lag → aggregate → sort → chart).
+
+**The prompt is generated, not maintained.** The node schema block inside `MUTATE_SYSTEM_PROMPT` is injected from `node_catalog.json` (§3.7), so a tool added to the catalogue becomes a tool Hermes can emit without anyone editing `hermes.py`. Rule 9 of the prompt tells the model to use only the listed config keys, and `normalizeConfig` enforces that on the way in regardless.
+
+**Frontend resolution.** `engine/patch.ts` maps the patch's `n0`-style refs onto freshly generated node ids. Refs are looked up by their **string** form (`"n0"`, `"0"`, and `sourceIndex` are all registered), and edges pointing at ids already on the canvas are preserved so a patch can extend an existing graph. Edges that cannot be resolved are dropped with a console warning rather than becoming dangling references.
 
 ### 3.4 Chaos Self-Correction Agent
-If Ikaros throws a runtime error (e.g., `Table 'transactions' does not exist`), Chaos intercepts the error message and DAG context, repairing the SQL with self-contained mock data using DuckDB `VALUES` constructs:
 
-```sql
--- Chaos Auto-Injected Mock Query Fix
-CREATE TEMP TABLE filtered_customers AS 
-SELECT * FROM (VALUES (2026, 1500, 1), (2026, 2000, 2), (2025, 500, 3)) 
-AS t(year, amount, user_id) 
-WHERE year = 2026 AND amount > 1000;
-```
+`POST /api/v1/chaos/fix` receives the failed SQL, the DuckDB error and the surrounding DAG, and returns `{fixedSqlQuery, explanation}`. The canvas then rewrites the node's SQL, re-executes it, and logs a `CHAOS` entry. The request uses a 4-second `AbortSignal.timeout`; if the backend is unreachable the original error is preserved and reported as `Chaos Agent 離線`.
 
 ### 3.5 Topological Pipeline Scheduler
-Implements Kahn's Algorithm to sort nodes based on edge dependencies, ensuring upstream nodes execute and materialize before downstream queries run.
+
+`engine/scheduler.ts` implements Kahn's Algorithm with cycle detection:
 
 ```typescript
-function getTopologicalOrder(nodes: Node[], edges: Edge[]): Node[] {
-  const inDegree: Record<string, number> = {};
-  const adjList: Record<string, string[]> = {};
-
-  nodes.forEach((n) => { inDegree[n.id] = 0; adjList[n.id] = []; });
-  edges.forEach((e) => {
-    adjList[e.source].push(e.target);
-    inDegree[e.target] = (inDegree[e.target] || 0) + 1;
-  });
-
-  const queue: string[] = nodes.filter((n) => inDegree[n.id] === 0).map((n) => n.id);
-  const order: string[] = [];
-
-  while (queue.length > 0) {
-    const currId = queue.shift()!;
-    order.push(currId);
-    (adjList[currId] || []).forEach((neighbor) => {
-      inDegree[neighbor]--;
-      if (inDegree[neighbor] === 0) queue.push(neighbor);
-    });
-  }
-
-  return order.map((id) => nodes.find((n) => n.id === id)!).filter(Boolean);
-}
+// Membership must be tested with a Set — NOT with truthiness.
+// inDegree starts at 0, and !0 === true, so a truthiness guard silently
+// discards every edge and the "order" degrades to alphabetical.
+edges.forEach((e) => {
+  if (!known.has(e.source) || !known.has(e.target)) return;  // ignore dangling
+  const key = `${e.source}\u0000${e.target}`;
+  if (counted.has(key)) return;                              // dedupe parallel edges
+  counted.add(key);
+  inDegree.set(e.target, (inDegree.get(e.target) ?? 0) + 1);
+  adj.get(e.source)!.push(e.target);
+});
 ```
+
+The module provides:
+* `topologicalSort` — returns `null` on cycle (self-loops included).
+* `getAncestorClosure` — the node plus all transitive upstream nodes, used so clicking a node executes its whole subgraph rather than one orphaned query.
+* `sortSubgraphTopologically` — execution-ready ordering of a subset.
+* `orderUpstreamSources` — JOIN input ordering (`left` handle before `right`).
+* `findDescendants` — used to **skip** downstream nodes once an upstream node fails, so a target never reports results computed from a stale table.
+
+### 3.6 Exporter (SQL CTE + Workflow Archive)
+
+`engine/exporter.ts` is the only way a workflow leaves the browser. It has two jobs.
+
+**`exportToSqlCte(nodes, edges, {sink?})`** compiles the whole DAG into a *single* DuckDB query. The key insight is that a node's output table name **is** its node id, so the `SELECT` body produced by `compileNodeSelect()` already references its upstream nodes by the exact name a CTE would have — no rewriting is needed:
+
+```sql
+WITH
+-- Input (INPUT_DUCKDB)
+"node_in" AS (
+    SELECT * FROM "raw_data"
+),
+-- Filter (FILTER)
+"node_f" AS (
+    SELECT * FROM "node_in" WHERE "amount" > 1000
+)
+SELECT * FROM "node_f";
+```
+
+* Returns `null` when the graph contains a cycle — a cyclic DAG has no linear CTE form, and silently emitting something wrong would be worse than refusing.
+* `VIZ_CHART` is skipped (it creates no table) and the final `SELECT` is pointed at its source instead.
+* Tables not produced by the workflow (`raw_data`, uploaded-file tables) are listed in a header comment so the exported script is honest about its prerequisites.
+* There is **one** query generator: `generateSqlFromConfig()` wraps `compileNodeSelect()` with the `CREATE OR REPLACE TEMP TABLE` shell for live execution, and the exporter inlines the very same body. Exported SQL and executed SQL cannot drift apart.
+
+**`exportWorkflowJson` / `importWorkflowJson`** persist the canvas as a `.json` / `.synapse` archive. Callbacks (`onExecute`, `onChangeConfig`) and transient state (`executionState`) are never serialised — they cannot survive a round trip anyway. `sqlQuery` *is* serialised, so a Chaos-repaired query is not silently reverted on reload. Import is defensive: malformed JSON, a foreign `format`, missing `nodes`/`edges`, duplicate ids, and edges pointing at non-existent nodes are all rejected or dropped rather than producing a broken canvas.
+
+The same JSON is also written to `localStorage` (`engine/persistence.ts`, key `synapse.workflow.autosave.v1`) on a debounce and restored on mount, so a refresh no longer loses the canvas. Reusing the save format is deliberate: "autosave", "manual save" and "manual load" can never disagree about what a workflow is. Storage access is fully wrapped in `try/catch` (private mode, quota) and the storage object is injectable so the module is testable in Node.
+
+**`exportToPolars`** emits a runnable Python script instead of SQL. It walks the same topological order and reads the same `config` objects, so the two exports describe the same pipeline — but Polars is not SQL, and where the translation cannot be done reliably the exporter **refuses and marks the node** rather than guessing. Refusals appear as a `TODO` in the script plus a `needs review` footer listing the offending node ids, and the UI surfaces that list in the notice strip. See the sharp-edges note in §7 for the exact boundary.
+
+The canvas toolbar exposes **New** / **Export SQL** / **Export Python** / **Save** / **Load**; the notice strip reports outcomes (including the external tables the exported SQL expects) and auto-dismisses. **New** clears the canvas *and* the autosave together (with a confirmation when there is something to lose) — clearing only the canvas would leave a save that resurrects the old workflow on the next reload.
+
+### 3.7 Node Catalogue — one source of truth for "what tools exist"
+
+Every layer needs to know the node vocabulary: the compiler needs a `case` per type, the palette needs a label and an icon, the config form needs a field list, the Polars exporter needs an emitter, and Hermes needs to know what it is allowed to emit. Historically each of those kept its own copy, and the copies **drifted**: `hermes.py` was still advertising an eleven-type vocabulary (no `SELECT`, no `UNION`, no `SAMPLE`, no `RENAME`), a single-key `SUMMARIZE` shape, and a `SORT` key (`groupBy`) that had been renamed to `field` months earlier. The agent could not be asked for a tool it did not know existed.
+
+`engine/nodeCatalog.ts` is now the single declaration:
+
+```typescript
+export const NODE_CATALOG: Record<AlteryxNodeType, NodeSpec> = { /* 22 entries */ };
+```
+
+Typing it as a `Record` over the `AlteryxNodeType` union is the point: **a new union member without a catalogue entry is a `tsc` error**, not a runtime surprise. Each `NodeSpec` carries `{type, label, category, description, whenToUse, inputs, nodeType, icon, color, defaults, fields}`, where `inputs` is `0` (source) / `1` (single) / `2` (dual: left + right) / `-1` (unbounded, UNION).
+
+From that one declaration:
+
+* **The palette** is generated (`catalogByCategory()`), grouped in `CATEGORY_ORDER` = In/Out · Preparation · Transform · Join · BI.
+* **The config forms** are hand-written React, but a drift guard asserts that every declared field of every type is actually read by the compiler (see below).
+* **`patch.ts`** takes the node's `nodeType` and label from the spec, and runs the incoming config through **`normalizeConfig(type, config)`**, which drops hallucinated keys and back-fills declared defaults — so a model that invents `{"sortField": …}` cannot smuggle an unknown key into the graph.
+* **`scripts/gen_node_catalog.mjs`** bundles the catalogue with esbuild and writes `apps/server/node_catalog.json` (types, canvas hint keys, a ready-made prompt section, and the full node list). `hermes.py` **loads that file** and derives `VALID_NODE_TYPES`, its system-prompt schema block and its canvas-hint key list from it. `pnpm gen:catalog` regenerates; `pnpm check:catalog` exits non-zero if the committed JSON is stale. A hardcoded fallback (12 types) is kept for the case where the JSON is missing, and it prints a warning when used.
+
+The drift guards live in the verification suite (§5, sections 10 and 14) and are deliberately **non-vacuous**:
+
+* `compileNodeSelect()` has a `default:` branch that returns passthrough SQL, so "does type X work?" is true for *any* string. The guards therefore parse the real `case "X":` labels out of `astCompiler.ts` and `exportPolars.ts` **from source** and compare those sets to the catalogue.
+* One guard runs `hermes.py` **inside `apps/server/venv`** and asserts `VALID_NODE_TYPES == catalogue.types`. That single assertion is what makes "the agent understands the new tools" a fact rather than a claim.
+* `node_catalog.json` is byte-compared against a fresh generation, so a catalogue edit that is not regenerated fails CI.
 
 ---
 
 ## 4. End-to-End Execution Lifecycle
 
 ```
-[ User Input Prompt ]
+[ User Prompt ]
         │
         ▼
-[ Daedalus Agent ] ──(Generates Schema)──► [ Nymph Canvas Rendering ]
-                                                    │
-                                           (Click "Run Pipeline")
-                                                    │
-                                                    ▼
-                                       [ Topological Order Sorting ]
-                                                    │
-                                                    ▼
-                                       [ Ikaros DuckDB-WASM Worker ]
-                                                    │
-                             ┌──────────────────────┴──────────────────────┐
-                       (On Success)                                   (On Error)
-                             │                                             │
-                             ▼                                             ▼
-                 [ Render IPC Result ]                           [ Chaos Agent Repair ]
-                                                                           │
-                                                                 (Auto-Inject Mock SQL)
-                                                                           │
-                                                                           ▼
-                                                                 [ Resume Pipeline ]
+[ Hermes Agent ] ──(ast_patch)──► [ patch.ts: ref → real node ids ]
+                                            │
+                                            ▼
+                                  [ Nymph Canvas + auto-layout ]
+                                            │
+                              (click a node, or "Run Pipeline")
+                                            │
+                                            ▼
+                       [ getAncestorClosure / whole graph ]
+                                            │
+                                            ▼
+                        [ Kahn topological sort (null ⇒ cycle, abort) ]
+                                            │
+                                            ▼
+                        [ Ikaros Web Worker · DuckDB-WASM ]
+                                            │
+                     ┌──────────────────────┴──────────────────────┐
+                 (success)                                     (error)
+                     │                                             │
+                     ▼                                             ▼
+        [ Data Drawer: SQL-paged table ]              [ Chaos Agent repair ]
+        [ bounded rows ≤ 100 per page ]                          │
+                     │                                  (re-execute node)
+                     ▼                                             │
+        [ Logs tab: INFO/SQL/SUCCESS/ERROR/CHAOS ] ◄───────────────┘
+                     ▲
+                     │  any node still failing → findDescendants()
+                     └─ downstream nodes are skipped, not run on stale data
+
+[ Any time ] ──► [ Exporter ] ──► Export SQL (whole DAG → one CTE query)
+                              └─► Save / Load workflow (.json / .synapse)
 ```
 
 ---
@@ -177,39 +228,133 @@ function getTopologicalOrder(nodes: Node[], edges: Edge[]): Node[] {
 ### Backend Setup (FastAPI / Python `venv`)
 
 ```powershell
-# 1. Navigate to server directory and create venv
 cd apps/server
 python -m venv venv
 .\venv\Scripts\Activate.ps1
+pip install -r requirements.txt
 
-# 2. Install dependencies
-pip install fastapi uvicorn langgraph langchain-openai pydantic python-dotenv
+# Optional, verification-only. Nothing in apps/server/*.py imports these —
+# they exist so the DuckDB and Polars cross-checks can actually execute
+# instead of being skipped.
+pip install -r requirements-dev.txt
 
-# 3. Configure API Key in apps/server/.env
-OPENROUTER_NEMOTRON3point5_API_KEY="sk-or-v1-..."
+# Configure API keys. Note: the .env lives at the REPO ROOT and is loaded
+# via load_dotenv(), which walks up from apps/server/.
+#   C:\...\synapse\.env
+#   OPENROUTER_NEMOTRON3point5_API_KEY="sk-or-v1-..."
+#   OPENROUTER_GLM2_API_KEY="..."        # optional fallback model
 
-# 4. Start Uvicorn backend server
 python -m uvicorn main:app --reload --port 8000
 ```
+
+> `apps/server/node_catalog.json` is generated from the TypeScript catalogue and read by `hermes.py`. After changing `engine/nodeCatalog.ts`, run `pnpm gen:catalog` and commit the result; `pnpm check:catalog` fails if you forget.
+
+The server is **optional**. Without it the canvas, DuckDB execution, paging and layout all work; only Hermes (LLM) and Chaos (auto-repair) degrade, and both degrade explicitly rather than silently.
 
 ### Frontend Setup (React / Vite / `pnpm`)
 
 ```bash
-# 1. Build internal packages from monorepo root
+# from the monorepo root
+pnpm install
 pnpm --filter @synapse/ikaros-arrow build
 pnpm --filter @synapse/schema build
 
-# 2. Launch Vite dev server
-pnpm --filter @synapse/web dev
-# Access UI at http://localhost:5173/
+pnpm --filter @synapse/web dev     # http://localhost:5173/
 ```
+
+### Verification
+
+```bash
+pnpm verify     # 417 assertions, all passing, zero skips
+pnpm check:catalog   # fails if apps/server/node_catalog.json is stale
+```
+
+`scripts/verify.mjs` bundles the **real** TypeScript modules with esbuild and exercises them in Node, then runs `scripts/verify_hermes.py` against the backend's pure functions using `apps/server/venv`. It covers:
+
+1. **Kahn's Algorithm** — dependency order, cycle/self-loop detection, parallel-edge dedup, dangling edges, ancestor closure, failure propagation.
+2. **SQL compiler** — literal escaping, identifier quoting, rejection of injected operators / aggregate functions / JOIN types / expressions, the `compileNodeSelect` ↔ `generateSqlFromConfig` split, `SELECT` / `SORT`, and FILTER's two-branch emission plus `sourceHandle` resolution.
+3. **Hermes patch resolution** — ref→id mapping across the Python↔TypeScript boundary, canvas-extension edges, defensive edge dropping, self-loop guard.
+4. **Hermes backend** — canvas context extraction for the shape the frontend actually sends, and patch validation.
+5. **Exporter** — CTE ordering, cycle rejection, `VIZ_CHART` skipping, external-source reporting, raw-SQL node unwrapping, and JSON round-trip stability (including that re-exporting an imported file is byte-identical).
+6. **Runtime execution (Python DuckDB)** — the exported CTE SQL is piped into a real DuckDB and the resulting rows are asserted (`scripts/run_duckdb_sql.py`), so the export is proven to produce correct *numbers*, not merely correct-looking SQL. Needs a Python with `duckdb` (`requirements-dev.txt`); **skipped** (not failed) otherwise. Point `SYNAPSE_DUCKDB_PYTHON` at an interpreter to enable it.
+7. **Runtime execution (duckdb-wasm)** — `scripts/verify_duckdb_wasm.mjs` instantiates the **exact engine the app ships** (duckdb-wasm 1.32.0, DuckDB v1.4.3) from the Node build in `node_modules/.pnpm`, feeds it SQL produced by the real compiler, and asserts the resulting data. This needs no external dependency. It is what proves the FILTER branch partition is exhaustive, that the `false` port really resolves to the `__false` table end-to-end, that `JOIN` retains both sides, that multi-statement `query()` executes every statement, that `SUMMARIZE` handles multiple keys and measures (including `COUNT(*)`, `COUNT(DISTINCT …)` and alias collisions), that `UNION BY NAME` aligns by column name where `UNION` (position) does not, that `SAMPLE` is reproducible, that `RENAME` renames *in place*, and that every awkward Arrow type (`DECIMAL`, `HUGEINT`, `LIST`, `STRUCT`, `INTERVAL`, `BLOB`, `DATE`, `TIMESTAMP`) survives `structuredClone` with the correct value. Sections **10–13** extend this to the eleven tools added in §3.7 (data cleaning, pivot/transpose, window functions, advanced joins), and section **14** holds the drift guards.
+8. **Python export** — the generated Polars script is checked three ways: string-level assertions on the emitted code, a real `python -m py_compile` run to prove it is valid Python, and an actual execution whose aggregates are asserted to match the DuckDB side. Needs a Python with `polars` (`requirements-dev.txt`); **skipped** (not failed) otherwise. Point `SYNAPSE_POLARS_PYTHON` at an interpreter to enable it. The expression translator is also tested on its *rejection* path: `AND` / `CASE` / `CAST` / unknown functions must return "cannot translate" rather than silently emitting wrong Python.
+9. **Autosave** — `engine/persistence.ts` takes an injectable storage object, so the failure modes that actually happen in browsers (quota exceeded, storage disabled in private mode, no `localStorage` at all) are asserted directly, including that none of them throw. The round trip is also asserted end-to-end: what autosave writes must be readable by `importWorkflowJson`, with a multi-aggregate `SUMMARIZE` config intact rather than silently downgraded to the old single-measure shape. Finally, the contract the "New" button and the restore guard depend on: an empty workflow is still a valid file, and a cleared autosave must read back as *nothing to restore* rather than as an empty workflow.
+10. **Node catalogue → backend sync (drift guard)** — `apps/server/node_catalog.json` must be byte-identical to a fresh generation, and `hermes.py` must be importable *in the venv* with `VALID_NODE_TYPES` exactly equal to the catalogue's type list, a prompt section that names every type, `_CANVAS_HINT_KEYS` matching the snapshot, and a keyword fallback whose every `"type": "X"` exists in the catalogue. This is the assertion that makes "the agent knows about the new tools" verifiable rather than aspirational.
+
+Nothing in the suite is a hand-copied reimplementation: every module is bundled from source, and several tests deliberately include the *old* broken logic (the naive `NOT (cond)`, the dangling `n0` resolver) to demonstrate that the bug it guards against was real.
+
+### Manual diagnostic: the cross-engine probe
+
+`scripts/probe_engines.py` is **not** part of `pnpm verify` — it is the tool you reach for *before* writing a new emitter. It runs DuckDB and Polars side by side over the same fixtures and prints both results, which is how the six documented divergences (§7) were found. Run it with any interpreter that has `duckdb` and `polars`:
+
+```bash
+POLARS_SKIP_CPU_CHECK=1 apps/server/venv/Scripts/python.exe scripts/probe_engines.py
+```
+
+Its header lists the divergences found so far and says which ones the exporter compensates for; if a probe result ever contradicts that header, the comment — not the engine — is what needs updating.
 
 ---
 
 ## 6. Verification Checklist
 
-* [x] **DuckDB-WASM Worker**: Initializes properly with zero main-thread blocking.
-* [x] **Arrow IPC Transfer**: Memory stream conversion working across worker boundaries.
-* [x] **Text-to-DAG Pipeline**: Daedalus generates multi-stage SQL node graphs dynamically.
-* [x] **Topological Execution**: Sequential execution works for multi-node chains.
-* [x] **Self-Correction Loop**: Chaos intercepts missing table errors, injects `VALUES` mock datasets, updates nodes, and completes pipeline execution with verified output.
+* [x] **DuckDB-WASM Worker**: engine hosted in a dedicated Web Worker; main thread free of WASM work, with a visible fallback path.
+* [x] **Bounded transfers**: single queries capped at `DEFAULT_MAX_ROWS`; drawer pages at 100 rows via `LIMIT/OFFSET`.
+* [x] **Topological Execution**: Kahn's Algorithm with cycle detection; clicking a node executes its full upstream subgraph.
+* [x] **Failure propagation**: a failed node blocks its descendants instead of letting them read stale tables.
+* [x] **Data Drawer**: mounted, wired to node inspection and pipeline logs, SQL-side paging + search + column type badges, theme-aware.
+* [x] **Text-to-Pipeline**: Hermes generates multi-node pipelines; the canvas resolves refs, recompiles downstream SQL, and auto-lays-out.
+* [x] **Self-Correction Loop**: Chaos intercepts failures, repairs SQL, re-executes, and logs the outcome.
+* [x] **SQL injection hardening**: quoted identifiers, escaped literals, operator/function/JOIN-type whitelists, structural expression guard, and file registration under a generated safe name instead of the user's filename.
+* [x] **Theme parity**: every node, panel, drawer and control subscribes to `ThemeContext` (Claude Light / GitHub Dark).
+* [x] **Export & persistence**: the whole DAG exports to one runnable CTE query; workflows save to and load from JSON, with the round trip covered by tests.
+* [x] **Palette reachability**: all **22** node types are draggable from the palette and have a config form. The palette is generated from `engine/nodeCatalog.ts`, so this cannot drift: `tsc` rejects a union member with no catalogue entry, and tests assert that the compiler switch, the Polars emitters, the declared config fields and the `lucide-react` icon map all agree with the catalogue.
+* [x] **Agent ↔ tool vocabulary**: `hermes.py` derives its allowed node types and prompt schema from the generated `node_catalog.json`; a test imports `hermes.py` in the venv and asserts its `VALID_NODE_TYPES` equals the catalogue exactly. The keyword fallback is table-driven and understands the same 22 tools.
+* [x] **Data cleansing tools**: `UNIQUE` (keys or whole row), `IMPUTE` (constant or column mean), `DATA_CLEANSING` (trim / collapse whitespace / empty→NULL) — each compiled to `SELECT * REPLACE (…)` so column order is preserved.
+* [x] **Pivot / transpose tools**: `CROSS_TAB` (`PIVOT … USING agg(value) GROUP BY keys`), `TRANSPOSE` (`UNPIVOT … INTO NAME … VALUE …`), `TEXT_TO_COLUMNS` (`string_split` + index).
+* [x] **Window / sequence tools**: `MULTI_ROW_FORMULA` (any `LAG`/`LEAD`/`FIRST_VALUE` expression, with `OVER` injected per call site), `RUNNING_TOTAL`, `RANK` (`RANK` / `DENSE_RANK` / `ROW_NUMBER`).
+* [x] **Advanced join tools**: `APPEND_FIELDS` (row-wise `CROSS JOIN` with both sides projected) and `FIND_REPLACE` (lookup-table replace, keeping or nulling unmatched keys).
+* [x] **FILTER true/false semantics**: both branches are materialised, the partition is exhaustive and disjoint (NULL rows included), and a downstream node's `sourceHandle` decides which branch it reads.
+* [x] **Lossless JOIN**: `JOIN` retains both tables' columns; colliding names are suffixed rather than dropped.
+* [x] **Multi-key / multi-measure SUMMARIZE**: any number of group keys and aggregations, with `COUNT(*)`, `COUNT(DISTINCT …)`, alias deduplication, and backwards compatibility with the old single-key config shape.
+* [x] **UNION / SAMPLE / RENAME nodes**: `UNION` merges N upstreams and defaults to `UNION ALL BY NAME`; `SAMPLE` offers first-N or reproducible random sampling; `RENAME` renames any number of columns.
+* [x] **Python (Polars) export**: the DAG exports to a runnable `.py` script. Untranslatable constructs are marked with `TODO` and reported by node id rather than silently mistranslated.
+* [x] **Schema-driven field pickers**: config forms offer the real upstream column names via `ikaros.describe()`, while still allowing free text, and warn when a referenced column does not exist upstream.
+* [x] **Crash containment**: an app-level error boundary plus a per-node boundary, so one bad node degrades to a card instead of blanking the app.
+* [x] **Autosave**: the canvas is written to `localStorage` and restored on reload, using the same JSON format as manual save/load. **New** clears both the canvas and the save.
+* [x] **Hermes resilience**: the chat request has a 30 s timeout with a specific "timed out" message, and non-2xx responses are surfaced instead of being swallowed.
+* [x] **Serialised execution**: node-level and pipeline-level execution share one mutex, so overlapping runs cannot interleave DDL against the same temporary tables.
+
+---
+
+## 7. Known Limitations / Roadmap
+
+**Not yet implemented**
+* **Python code export** — DONE (Polars); see suite 8. Pandas emission is not offered. `serializeArrowTable` / `parseArrowBuffer` in `@synapse/ikaros-arrow` remain unused.
+* **Alteryx tool coverage** — the eleven tools listed in §6 are done. Still absent: `REGEX` (regex parse/replace/match), `TEXT_TO_COLUMNS` by regex (only separator-split exists), `MULTI_FIELD_FORMULA`, `OVERSAMPLE`/`JOIN` fuzzy matching, `SPATIAL`, and the `IN_DB` / `OUTPUT` writers. Adding one is now a catalogue entry plus a compiler case plus an emitter — the palette, the config-form field list, the Hermes prompt and the drift guards all follow automatically.
+* **Workflow import of uploaded files** — a saved workflow records the *table name* for a file-backed input, not the file bytes. Reloading requires re-uploading the CSV/Parquet.
+* **Daedalus** — the `/api/v1/daedalus/generate` endpoint exists but nothing in the UI calls it; Hermes superseded it.
+* **COI / threaded DuckDB** — the `coi` bundle is not registered (it needs COOP+COEP headers and would add ~34 MB of wasm to the build). Re-enable in `bundles.ts` together with the headers.
+* **Component tests** — `pnpm verify` covers engine logic only; there is no React test runner configured.
+
+**Known sharp edges**
+* **`DECIMAL` values used to be mangled in the UI — fixed.** DuckDB returns `DECIMAL` for `SUM()` over decimal columns and for literals like `1000.0` (which is `DECIMAL(5,1)`, not a float — including this project's own seeded `raw_data`). Arrow represents such a value as a `DecimalBigNum`: a little-endian array of 32-bit words holding the **unscaled** integer, with the scale living on `field.type.scale`. `arrowTableToJSON()` previously only unwrapped `bigint`, so the object crossed the worker boundary and degraded to `{"0":7,"1":0,"2":0,"3":0}` — `0.07` rendered as `7`. It now dispatches on the field type, folds the words into a `BigInt` (two's-complement for negatives) and divides by `10^scale`. `LIST` → `Vector` and `STRUCT` → `StructRow` are normalised the same way, because those threw `could not be cloned` and would have failed an entire query. Suite 7 asserts both the round-trip and the old broken behaviour.
+* **`RENAME` used to move the renamed column to the end — fixed.** The old `SELECT * EXCLUDE (old), old AS new` idiom appends the new column rather than putting it back in place, which downstream nodes that depend on column *order* (`UNION` in `POSITION` mode) would see. It now emits **`SELECT * RENAME (old AS new)`**, which renames in place and preserves order — verified against the shipped engine, and now consistent with the Polars export (`.rename()`).
+* **`SELECT * REPLACE (…)` preserves column position, and can widen a column's type.** `IMPUTE` / `DATA_CLEANSING` rely on this: replacing an `INTEGER` column with `AVG(x) OVER ()` widens it to `DOUBLE` *in place*. Asserted with `typeof()`.
+* **`OVER` binds only to the immediately preceding function call.** `(LAG(x,1)) OVER (…)` and `(LAG(x,1) - x) OVER (…)` are **syntax errors** in DuckDB; `LAG(x,1) OVER (…)` and `(LAG(x,1) OVER (…)) - x` are valid. `MULTI_ROW_FORMULA` therefore **injects** `OVER` after each window call inside the expression rather than wrapping the whole expression.
+* **`APPEND_FIELDS` must alias both sides.** `SELECT * FROM t CROSS JOIN t` fails with `Ambiguous reference to table t`; the emitter produces `SELECT a.*, b.* FROM x a CROSS JOIN y b`.
+* **`FIND_REPLACE` requires the join key and the replaced column to have compatible types.** DuckDB's `COALESCE` refuses to mix `VARCHAR` and `INTEGER`, and there is **no `CAST(x AS typeof(y))`** to resolve it generically. A blanket cast was rejected because it would silently stringify numeric→numeric replacements. Instead: the catalogue ships type-consistent defaults (`code` / `label`), the constraint is documented in the field hint, and a test asserts both that a mismatched pair **fails loudly** and that a matched pair works.
+* **A missing config key can make the form and the SQL disagree — fixed.** The catalogue had **two** disjoint default mechanisms: a whole-node `spec.defaults` (used by the palette drop) and a per-field `default` (used by `normalizeConfig`). Only the second reached the Hermes path, and `FILTER`'s `val` had no per-field default — so a Hermes-generated FILTER node arrived with no `val`. The compiler has `?? "1000"` fallbacks everywhere, so the SQL was *correct*, but the config form reads `config.val` directly and rendered an **empty "值" field** next to a preview saying `amount > 1000`. Two assertions now hold the line: `normalizeConfig` seeds from both layers, and `defaultConfigFor(t)` must equal `normalizeConfig(t, {})` for all 22 types — so "drag a node" and "ask the agent for a node" produce the same starting config.
+* **Three Polars ↔ DuckDB divergences are documented rather than papered over.** (1) `cum_sum()` propagates NULL while DuckDB's `SUM(…) OVER (ROWS …)` ignores it, so the Polars export calls `.fill_null(0)` first — an all-NULL frame still differs (NULL vs 0). (2) Polars `list.get(i)` **throws** out of bounds while DuckDB's `string_split(...)[i]` returns NULL, so the export uses `list.get(i, null_on_oob=True)`. (3) `pivot` on a NULL pivot value creates a literal `"null"` column in Polars while DuckDB drops those rows, and missing combinations come back as `0` in Polars vs `NULL` in DuckDB. `rank()` likewise returns null for NULL input in Polars but assigns a rank in DuckDB. These are asserted so a future change cannot quietly widen them.
+* **A bare `NULL` token in a CSV is not a null.** Both DuckDB's `read_csv_auto` and Polars' `read_csv` read the literal text `NULL` as the **string** `'NULL'`, degrading the column to `VARCHAR` (so `amount > 1000` becomes a Binder Error). An **empty field** is what both engines read as a real null. The two engines agree here; only the test fixture was wrong, twice.
+* **`UNION` defaults to `BY NAME`, and that default matters.** Positional union of branches that went through different transforms silently wires values into the wrong columns (suite 7 asserts exactly this failure mode). `BY_NAME` costs a hash by name but is the only safe default; `POSITION` is opt-in.
+* **The Polars translator is deliberately narrow.** It handles arithmetic, string literals, `NULL`/`TRUE`/`FALSE`, parentheses and a whitelist of scalar functions (`ABS`, `CEIL`, `FLOOR`, `SQRT`, `ROUND`, `UPPER`, `LOWER`, `LENGTH`, `TRIM`, `COALESCE`). Anything else — `AND`/`OR` (Polars needs explicit parentheses), `CASE`, `CAST`, subqueries, unknown functions — is **refused**, and the node is listed in `needsReview` with a `TODO` left in the script. It never guesses.
+* **SQL and Polars literals are typed differently.** SQL's `lit()` lets DuckDB coerce `'1000'` to a number based on the column type; the Polars export has to pick a Python type from the text alone. Comparing a numeric literal against a string column will therefore behave differently in the two outputs.
+* **Autosave will not overwrite an existing save with an empty canvas** until the canvas has held content at least once. Deliberate (a refresh must not wipe your work), but it means "delete every node" does not clear the autosave — use **New** for that. Note that an empty workflow is still a *valid* workflow file (it parses to zero nodes), so the restore path must guard on node count rather than on parse success; suite 9 asserts that contract explicitly.
+* BigInt values above `Number.MAX_SAFE_INTEGER` lose precision when materialised.
+* Drawer search is a single `ILIKE` across all columns; fine for inspection, not for huge tables.
+* Applying a Hermes patch re-lays-out the **entire** canvas, which moves manually positioned nodes.
+* Schema-driven pickers only know a column list once the upstream node has actually run; before that they fall back to free text and suppress the "column not found" warning rather than guess.
+* `onCanvasStateChange` is debounced (250 ms) and autosave is debounced (800 ms), so the DAG context Hermes receives can trail the canvas by up to a quarter second.
+* Exported CTE SQL does not embed file-backed inputs — `read_csv_auto` / `read_parquet` calls for uploaded files are listed as external sources rather than inlined, so the script needs the file registered first. The Polars export does emit a `read_csv` / `read_parquet` call, but only with the original filename, so the path usually needs adjusting.
+* The root `.env` holds live API keys and is gitignored — keep it that way.
