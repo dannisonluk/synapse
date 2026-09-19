@@ -326,7 +326,7 @@ _FALLBACK_STEPS: List[Dict[str, Any]] = [
                    "method": "RANK", "partitionBy": [], "descending": True},
     },
     {
-        "patterns": ["running", "cumulative", "累計", "累加"],
+        "patterns": ["running total", "running", "cumulative", "累計", "累加"],
         "type": "RUNNING_TOTAL", "label": "Running Total",
         "config": {"target": "amount", "outputColumn": "amount_running",
                    "partitionBy": [], "orderBy": "id"},
@@ -358,6 +358,35 @@ _FALLBACK_STEPS: List[Dict[str, Any]] = [
 ]
 
 
+def _fallback_matches(prompt_lower: str) -> List[Dict[str, Any]]:
+    """挑出命中的 fallback 步驟，並套用「較具體者勝」的遮蔽規則。
+
+    為什麼需要遮蔽：關鍵字比對是子字串比對，所以短詞會藏在長詞裡面。
+    `"pivot"` 是 `"unpivot"` 的子字串 —— 使用者說「unpivot amount」時，
+    CROSS_TAB 與 TRANSPOSE 都會命中，於是產生
+    `INPUT → CROSS_TAB → TRANSPOSE`：**多了一個使用者沒要求的樞紐**，
+    而且中間那張表會是錯的。這正是「看起來有動、其實做錯事」的類型。
+
+    規則：若某一步命中的關鍵字是**另一步**命中關鍵字的子字串，
+    代表它只是更長詞彙的一部分，應予丟棄。
+    所以 "pivot" ⊂ "unpivot" → CROSS_TAB 被遮蔽；
+    而 "total" ⊂ "running total" → 說「running total」時不會多出 SUMMARIZE。
+    同時 `_FALLBACK_STEPS` 的順序被保留（它決定節點在 pipeline 中的先後）。
+    """
+    hits: List[tuple] = []
+    for step in _FALLBACK_STEPS:
+        matched = [k for k in step["patterns"] if k in prompt_lower]
+        if matched:
+            hits.append((step, max(matched, key=len)))
+
+    out: List[Dict[str, Any]] = []
+    for step, key in hits:
+        shadowed = any(other != key and key in other for _, other in hits)
+        if not shadowed:
+            out.append(step)
+    return out
+
+
 def _fallback_ast_patch(prompt: str) -> Dict[str, Any]:
     """LLM 失敗時的決定性 fallback：關鍵字 → 模板 pipeline"""
     pl = prompt.lower()
@@ -368,9 +397,7 @@ def _fallback_ast_patch(prompt: str) -> Dict[str, Any]:
     edges: List[Dict[str, Any]] = []
     idx = 1
 
-    for step in _FALLBACK_STEPS:
-        if not any(k in pl for k in step["patterns"]):
-            continue
+    for step in _fallback_matches(pl):
         nodes.append({
             "id": f"n{idx}",
             "sourceIndex": idx,

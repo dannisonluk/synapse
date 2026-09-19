@@ -108,6 +108,25 @@ check("fallback builds full chain",
       ["INPUT_DUCKDB", "FILTER", "SUMMARIZE", "VIZ_CHART"])
 check("fallback edges chain", len(fb["edges"]), 3)
 
+# --- fallback 關鍵字遮蔽 -----------------------------------------------------
+# 「unpivot」包含「pivot」，所以子字串比對會讓 CROSS_TAB 與 TRANSPOSE 同時命中，
+# 產生 INPUT → CROSS_TAB → TRANSPOSE —— 使用者要的是轉置，卻先被樞紐了一次。
+# 這類 bug 不會報錯，只會給出錯的中間結果，所以必須逐條釘住。
+#
+# 案例清單放在 scripts/fallback_cases.py，由這裡與 fallback_pipelines.py
+# 共用 —— 後者會把同一批 patch 交給真實 DuckDB 執行。
+from fallback_cases import CASES as FALLBACK_CASES  # noqa: E402
+
+for prompt, want in FALLBACK_CASES:
+    got = [x["type"] for x in hermes._fallback_ast_patch(prompt)["nodes"]]
+    check(f"fallback {prompt!r}", got, want)
+
+check("fallback picks exactly one node for unpivot (not pivot+transpose)",
+      "CROSS_TAB" in [x["type"] for x in hermes._fallback_ast_patch("unpivot amount")["nodes"]],
+      False)
+check("every fallback node type is in the catalogue",
+      sorted({s["type"] for s in hermes._FALLBACK_STEPS} - set(hermes.VALID_NODE_TYPES)), [])
+
 # ---------------------------------------------------------------------------
 print(f"\n{len(FAILS)} failed" if FAILS else "\nALL PASS")
 sys.exit(1 if FAILS else 0)
