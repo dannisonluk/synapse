@@ -1,0 +1,11 @@
+# Normalise nothing globally — this repo predates .gitattributes and a blanket
+# rule would rewrite every file's line endings on the next checkout.
+#
+# The generated catalogue snapshot is the one file whose exact bytes matter:
+# `pnpm check:catalog` and the drift guard in `pnpm verify` compare it against a
+# fresh generation, and core.autocrlf would otherwise turn its LF into CRLF on a
+# fresh clone and fail the guard for no real reason.
+apps/server/node_catalog.json text eol=lf
+
+# Shell scripts must keep LF or they will not run.
+*.sh text eol=lf

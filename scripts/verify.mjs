@@ -1165,10 +1165,12 @@ section("9. persistence.ts — 自動存檔（可注入 storage，因此能在 N
 	const catalog = await loadTs("apps/web/src/engine/nodeCatalog.ts");
 	const snapshot = catalog.catalogSnapshot();
 
-	// 10a. 磁碟上的 JSON 必須與目錄重新產生一次的結果完全相同
+	// 10a. 磁碟上的 JSON 必須與目錄重新產生一次的結果完全相同。
+	// 比對前正規化 CRLF：Windows 上 core.autocrlf 會在 checkout 時改寫行尾，
+	// 若直接比 bytes，一次 fresh clone 就會讓這條守門誤報。
 	const generated = JSON.stringify(snapshot, null, 2) + "\n";
 	const onDisk = existsSync(CATALOG_JSON)
-		? readFileSync(CATALOG_JSON, "utf8")
+		? readFileSync(CATALOG_JSON, "utf8").replace(/\r\n/g, "\n")
 		: null;
 	check("apps/server/node_catalog.json exists", onDisk !== null, true);
 	check("node_catalog.json is byte-identical to a fresh generation of the catalogue",

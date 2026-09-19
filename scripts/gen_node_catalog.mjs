@@ -55,7 +55,11 @@ const json = JSON.stringify(snapshot, null, 2) + "\n";
 
 if (process.argv.includes("--check")) {
 	const current = existsSync(OUT) ? readFileSync(OUT, "utf8") : "";
-	if (current !== json) {
+	// 比對前先把 CRLF 正規化：Windows 上 core.autocrlf 會在 checkout 時把 LF
+	// 換成 CRLF，若直接比 bytes，一次 fresh clone 就會讓這條守門誤報。
+	// （.gitattributes 已把這個檔案釘成 LF，這裡是第二層保險 —— 不依賴 git 設定。）
+	const normalize = (s) => s.replace(/\r\n/g, "\n");
+	if (normalize(current) !== normalize(json)) {
 		console.error(
 			"✗ apps/server/node_catalog.json 與 nodeCatalog.ts 不同步。\n" +
 				"  請執行：node scripts/gen_node_catalog.mjs",
