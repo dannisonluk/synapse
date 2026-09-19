@@ -297,6 +297,15 @@ POLARS_SKIP_CPU_CHECK=1 apps/server/venv/Scripts/python.exe scripts/probe_engine
 
 Its header lists the divergences found so far and says which ones the exporter compensates for; if a probe result ever contradicts that header, the comment — not the engine — is what needs updating.
 
+### Why the harness bounds its own output
+
+`scripts/verify.mjs` caps every value it prints at 400 characters and installs handlers for `uncaughtException` / `unhandledRejection`. That is not cosmetic. Node's uncaught-exception reporter prints a **code frame** — the entire offending *source line*. Bundled files are a single line: `@duckdb/duckdb-wasm`'s `duckdb-node-blocking.cjs` is 1.25 MB with one line of **198,170 characters**. So a single unguarded throw from inside the engine dumps ~200 KB of minified source into the terminal and into whatever reads that output (measured: 181,840 bytes printed for a 180 KB single-line file; 421 bytes with the guard).
+
+Two habits follow from this, and they apply to any harness built this way:
+
+* **Wrap every engine call in `try`/`catch`.** An error that escapes uncaught is what triggers the code frame. The guard is the safety net, not the fix.
+* **Never pipe unbounded output through `grep -A/-B/-C`.** Those flags print whole lines regardless of length, so one huge line defeats any `head`/`tail` downstream. Redirect to a file and inspect it with `cut -c1-300`.
+
 ---
 
 ## 6. Verification Checklist

@@ -22,6 +22,32 @@ const CATALOG_JSON = join(ROOT, "apps", "server", "node_catalog.json");
 let failures = 0;
 let checks = 0;
 
+/**
+ * 輸出長度上限。**這不是美觀問題，是可用性問題。**
+ *
+ * Node 印未捕捉例外時會附上「程式碼框架」—— 也就是**出錯的那一整行原始碼**。
+ * 打包後的檔案是單行：`@duckdb/duckdb-wasm` 的 `duckdb-node-blocking.cjs`
+ * 有 1.25MB、其中一行長達 198,170 字元。所以任何一個從它內部拋出、
+ * 又沒有被 try/catch 接住的錯誤，都會讓 Node 一次印出近 200KB 的 minified 原始碼。
+ * 那會灌爆終端輸出，也會灌爆讀取這些輸出的對話上下文（實測曾被截取 106KB 進上下文）。
+ *
+ * 因此：所有輸出都經過 brief()，並且註冊未捕捉例外的處理器。
+ */
+const MAX_OUT = 400;
+function brief(v) {
+	const s = typeof v === "string" ? v : JSON.stringify(v);
+	return s.length > MAX_OUT ? `${s.slice(0, MAX_OUT)}… (+${s.length - MAX_OUT} 字元已省略)` : s;
+}
+
+for (const ev of ["uncaughtException", "unhandledRejection"]) {
+	process.on(ev, (err) => {
+		// 只印訊息與前幾層 stack frame；絕不讓 Node 的預設處理器印出程式碼框架
+		const stack = String(err?.stack || err).split("\n").slice(0, 6).join("\n");
+		console.error(`\n\x1b[31mFATAL\x1b[0m  ${ev}: ${brief(stack)}`);
+		process.exit(1);
+	});
+}
+
 function check(name, actual, expected) {
 	checks++;
 	const a = JSON.stringify(actual);
@@ -31,8 +57,8 @@ function check(name, actual, expected) {
 	} else {
 		failures++;
 		console.log(`  \x1b[31mFAIL\x1b[0m  ${name}`);
-		console.log(`        got      ${a}`);
-		console.log(`        expected ${e}`);
+		console.log(`        got      ${brief(a)}`);
+		console.log(`        expected ${brief(e)}`);
 	}
 }
 
