@@ -416,7 +416,12 @@ if (!py) {
 			cwd: ROOT, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"],
 		});
 		console.log(out.trimEnd().split("\n").map((l) => "  " + l).join("\n"));
-		if (out.includes("FAIL")) failures++;
+		// 後端套件的斷言要一併計入總數 —— 先前只印不數，於是回報的
+		// assertion 數低估了整個 Python suite（約 70 條）。
+		const pyPass = (out.match(/^PASS /gm) ?? []).length;
+		const pyFail = (out.match(/^FAIL /gm) ?? []).length;
+		checks += pyPass + pyFail;
+		failures += pyFail;
 	} catch (err) {
 		failures++;
 		console.log("  \x1b[31mFAIL\x1b[0m  hermes 測試執行失敗");
@@ -725,7 +730,29 @@ if (!duckPy) {
 // ===========================================================================
 section("7. 真實 duckdb-wasm 引擎 — SQL 語意");
 {
-	const wasmChecks = await runDuckDbWasmChecks(ROOT, loadTs);
+	// LLM 離線時的決定性 fallback patch，交給 wasm harness 端到端執行。
+	// 需要 venv 的 python；沒有就跳過這一節（其餘 wasm 斷言照跑）。
+	let fallbackPipelines = [];
+	if (py) {
+		try {
+			const raw = execFileSync(py, [join(ROOT, "scripts", "fallback_pipelines.py")], {
+				cwd: ROOT,
+				encoding: "utf8",
+				stdio: ["ignore", "pipe", "pipe"],
+				env: { ...process.env, POLARS_SKIP_CPU_CHECK: "1" },
+				maxBuffer: 8 * 1024 * 1024,
+			});
+			fallbackPipelines = JSON.parse(raw).pipelines ?? [];
+		} catch (err) {
+			console.log(
+				`  \x1b[33mSKIP\x1b[0m  fallback_pipelines.py 執行失敗：${String(err.message).slice(0, 120)}`,
+			);
+		}
+	} else {
+		console.log("  \x1b[33mSKIP\x1b[0m  沒有 python，跳過 fallback 端到端執行");
+	}
+
+	const wasmChecks = await runDuckDbWasmChecks(ROOT, loadTs, fallbackPipelines);
 	if (!wasmChecks) {
 		console.log(
 			"  \x1b[33mSKIP\x1b[0m  找不到 duckdb-wasm 的 node build（node_modules/.pnpm）",

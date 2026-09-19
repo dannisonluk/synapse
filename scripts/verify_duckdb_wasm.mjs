@@ -27,7 +27,7 @@ function resolveDuckDbDist(root) {
  * @param loadTs 由 verify.mjs 傳入的 esbuild bundler（避免重複實作）
  * @returns {{ name: string, actual: any, expected: any }[]}
  */
-export async function runDuckDbWasmChecks(root, loadTs) {
+export async function runDuckDbWasmChecks(root, loadTs, fallbackPipelines = []) {
 	const results = [];
 	const add = (name, actual, expected) => results.push({ name, actual, expected });
 
@@ -1097,6 +1097,101 @@ export async function runDuckDbWasmChecks(root, loadTs) {
 		[]);
 	// 未知型別不可拋錯（舊存檔可能有已移除的型別）
 	add("normalizeConfig tolerates an unknown type", catalog.normalizeConfig("NOPE", { a: 1 }), {});
+
+	// =====================================================================
+	// 15. 端到端：自然語言 → fallback patch → 畫布 → SQL → 真實引擎
+	// =====================================================================
+	// 前面各節證明「編譯器懂每一個工具」，第 10 節證明「hermes.py 知道有哪些工具」。
+	// 這一節證明**使用者講一句話，東西真的跑得動**。
+	//
+	// LLM 離線時 hermes 會產生決定性 fallback patch，而那份 patch 的 config 是
+	// 手寫的字串（欄位名、聚合函式、分隔符號）—— 從來沒有被任何引擎執行過。
+	// 「節點類型對」與「SQL 跑得動」是兩件不同的事，這裡把整條路走完：
+	//   prompt → _fallback_ast_patch → _validate_ast_patch
+	//          → patch.ts resolveAstPatch → exporter.exportToSqlCte → duckdb-wasm
+	if (fallbackPipelines.length) {
+		const patchMod = await loadTs("apps/web/src/engine/patch.ts");
+		const exporterMod = await loadTs("apps/web/src/engine/exporter.ts");
+
+		// fallback 的 config 會引用這些欄位。INPUT_DUCKDB 沒有 fileName 時讀 raw_data。
+		// 刻意放入重複列（UNIQUE 才有事可做）與 NULL（IMPUTE / TEXT_TO_COLUMNS 才不會空轉）。
+		conn.query(
+			`CREATE OR REPLACE TABLE raw_data AS SELECT * FROM (VALUES
+				(1, 1200, 2024, 'a', 'x,1'),
+				(1, 1200, 2024, 'a', 'x,1'),
+				(2, NULL, 2024, 'b', 'y,2'),
+				(3,  800, 2025, 'a', 'z,3'),
+				(4, 2500, 2025, 'b', NULL)
+			) AS t(id, amount, year, category, item);`,
+		);
+
+		let idSeq = 0;
+		const failures = [];
+		const zeroRows = [];
+		let executed = 0;
+
+		for (const pipe of fallbackPipelines) {
+			const resolved = patchMod.resolveAstPatch(pipe, [], () => `node_fb${++idSeq}`);
+			const cNodes = resolved.nodes.map((n) => ({
+				id: n.newNodeId,
+				type: n.flowNodeType,
+				data: { type: n.nodeType, label: n.label, config: n.config },
+			}));
+			const cEdges = resolved.edges.map((e, i) => ({
+				id: `efb${i}`,
+				source: e.source,
+				target: e.target,
+				targetHandle: e.targetHandle,
+			}));
+
+			const cte = exporterMod.exportToSqlCte(cNodes, cEdges);
+			if (!cte || !cte.sql) {
+				failures.push(`${pipe.prompt}: exporter produced no SQL`);
+				continue;
+			}
+			try {
+				const rows = conn.query(cte.sql).toArray();
+				executed += 1;
+				if (rows.length === 0) zeroRows.push(pipe.prompt);
+			} catch (err) {
+				failures.push(`${pipe.prompt}: ${String(err?.message || err).slice(0, 150)}`);
+			}
+		}
+
+		add(
+			`every fallback pipeline executes on the real engine (${executed}/${fallbackPipelines.length})`,
+			failures,
+			[],
+		);
+		add("no fallback pipeline returns zero rows", zeroRows, []);
+
+		// 抽查一個具體數字，確認不只是「有跑完」而是「算對」。
+		// 'dedupe the rows' → UNIQUE(columns=[]) → SELECT DISTINCT * 收掉重複列，
+		// 而 fixture 有 5 列、其中 2 列完全相同 → 應該剩 4 列。
+		// 用 `CREATE TABLE AS <整條 CTE>` 取值：這同時也證明匯出結果可組合。
+		{
+			const pipe = fallbackPipelines.find((p) => p.prompt === "dedupe the rows");
+			if (pipe) {
+				// 每個節點都要拿到**不同**的 id，否則 CTE 名稱重複 → Parser Error
+				let spotSeq = 0;
+				const resolved = patchMod.resolveAstPatch(pipe, [], () => `node_spot${++spotSeq}`);
+				const cNodes = resolved.nodes.map((n) => ({
+					id: n.newNodeId,
+					type: n.flowNodeType,
+					data: { type: n.nodeType, label: n.label, config: n.config },
+				}));
+				const cte = exporterMod.exportToSqlCte(cNodes, []);
+				let count = "ERROR";
+				try {
+					conn.query(`CREATE OR REPLACE TABLE t15 AS ${cte.sql}`);
+					count = q("SELECT count(*) AS n FROM t15;")[0][0];
+				} catch (err) {
+					count = String(err?.message || err).slice(0, 120);
+				}
+				add("fallback UNIQUE really drops the duplicated row", count, "4");
+			}
+		}
+	}
 
 	return results;
 }
