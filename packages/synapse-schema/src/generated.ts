@@ -19,6 +19,7 @@ export const NODE_TYPES = [
 	"FILTER",
 	"FORMULA",
 	"IMPUTE",
+	"MULTI_FIELD_FORMULA",
 	"MULTI_ROW_FORMULA",
 	"RANK",
 	"REGEX",
@@ -91,6 +92,12 @@ export const NODE_FIELDS: { readonly [K in NodeType]: readonly FieldSpec[] } = {
 		{ name: "columns", kind: "fieldList", label: "要補的欄位", required: true },
 		{ name: "method", kind: "enum", label: "補值方式", required: false, values: ["CONSTANT", "MEAN"] },
 		{ name: "fillValue", kind: "text", label: "常數值", required: false },
+	],
+	MULTI_FIELD_FORMULA: [
+		{ name: "columns", kind: "fieldList", label: "要套用的欄位", required: true },
+		{ name: "expression", kind: "text", label: "運算式", required: true },
+		{ name: "outputMode", kind: "enum", label: "輸出模式", required: false, values: ["OVERWRITE", "NEW_FIELD"] },
+		{ name: "newFieldSuffix", kind: "text", label: "新欄位後綴（NEW_FIELD）", required: false },
 	],
 	MULTI_ROW_FORMULA: [
 		{ name: "outputColumn", kind: "text", label: "新欄位名", required: true },
@@ -189,6 +196,7 @@ export const NODE_META: { readonly [K in NodeType]: NodeMeta } = {
 	FILTER: { label: "Filter", category: "Preparation", description: "依條件保留列，並產生 true / false 兩個輸出分支。", inputs: 1 },
 	FORMULA: { label: "Formula", category: "Preparation", description: "用運算式新增一個欄位（DuckDB scalar expression）。", inputs: 1 },
 	IMPUTE: { label: "Impute", category: "Preparation", description: "補上欄位中的空值（常數或該欄平均）。", inputs: 1 },
+	MULTI_FIELD_FORMULA: { label: "Multi-Field Formula", category: "Preparation", description: "同一個運算式一次套用到多個欄位（用 _CurrentField_ 代表當前欄位）。", inputs: 1 },
 	MULTI_ROW_FORMULA: { label: "Multi-Row Formula", category: "Preparation", description: "可跨列的運算式（視窗函數），例如取上一列的值。", inputs: 1 },
 	RANK: { label: "Rank", category: "Preparation", description: "排名（RANK / DENSE_RANK / ROW_NUMBER）。", inputs: 1 },
 	REGEX: { label: "RegEx", category: "Preparation", description: "用正規表示式比對、擷取或取代字串（MATCH / PARSE / REPLACE 三種模式）。", inputs: 1 },

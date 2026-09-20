@@ -14,7 +14,7 @@
 import type { Edge, Node } from "@xyflow/react";
 import { orderUpstreamSources, topologicalSort } from "./scheduler";
 import { resolveSourceTables, falseBranchTable } from "./astCompiler";
-import { safeOp, safeFunc, safeJoinType, safeExpr, safeUnionMode, safeSampleMode, safeImputeMethod, safeRankMethod, safeUnmatched, safeRegexMode, regexPattern, intLit } from "./sql";
+import { safeOp, safeFunc, safeJoinType, safeExpr, safeUnionMode, safeSampleMode, safeImputeMethod, safeRankMethod, safeUnmatched, safeRegexMode, regexPattern, safeMultiFieldOutputMode, safeNewFieldSuffix, hasCurrentField, applyCurrentField, intLit } from "./sql";
 
 // ---------------------------------------------------------------------------
 // Python literal / identifier
@@ -697,6 +697,54 @@ function emitNode(
 		// ---------------------------------------------------------------
 		// 視窗 / 序列組
 		// ---------------------------------------------------------------
+		case "MULTI_FIELD_FORMULA": {
+			const cols = [...new Set(nameList(config?.columns))];
+			if (cols.length === 0) return `${id} = ${src}  # 未選取欄位 → passthrough`;
+
+			const raw = safeExpr(config?.expression, "1");
+			if (!hasCurrentField(raw)) {
+				// 與 SQL 端一致：沒有 _CurrentField_ 就 passthrough。
+				// OVERWRITE 模式下把每一欄都寫成同一個常數是不可逆的資料破壞。
+				ctx.notes.push(
+					`節點 ${id}：運算式沒有用到 _CurrentField_ → 未改動任何欄位`,
+				);
+				return `${id} = ${src}  # 運算式缺少 _CurrentField_ → passthrough`;
+			}
+
+			// 先把運算式翻成 Polars，佔位符留成一個合法的識別字，翻完再把
+			// `pl.col("__CURRENT_FIELD__")` 逐欄換掉。
+			//
+			// 為什麼不直接代入欄位名：欄位名可能含空白或標點（`my field`），
+			// 那會讓 tokenizer 把它切成兩個識別字，產生語法正確但算錯的腳本。
+			// 先翻再換，等於借用翻譯器自己的引號規則。
+			const MARKER = `pl.col("__CURRENT_FIELD__")`;
+			const template = translateExprToPolars(applyCurrentField(raw, "__CURRENT_FIELD__"));
+			if (template === null || !template.includes(MARKER)) {
+				ctx.needsReview = true;
+				ctx.notes.push(
+					`節點 ${id} 的 MULTI_FIELD_FORMULA 運算式無法自動翻譯（${raw}）→ 已用 null 佔位，請手動改寫`,
+				);
+				return [
+					`# TODO: 無法自動翻譯 SQL 運算式 → ${raw}`,
+					`${id} = ${src}.with_columns(pl.lit(None).alias(${pyStr(cols[0])}))`,
+				].join("\n");
+			}
+
+			const mode = safeMultiFieldOutputMode(config?.outputMode);
+			const suffix = safeNewFieldSuffix(config?.newFieldSuffix);
+			const parts = cols.map((c) => {
+				// 就地改寫時 alias 沿用原欄位名 —— Polars 的 with_columns
+				// 同名即取代，且保留原本的位置，與 SQL 的 `SELECT * REPLACE` 一致。
+				const out = mode === "NEW_FIELD" ? c + suffix : c;
+				const expr = template.split(MARKER).join(`pl.col(${pyStr(c)})`);
+				// 一定要加括號：`.alias` 的綁定優先於二元運算子，所以
+				// `pl.col("x") * 1.1.alias("x")` 會變成 `float.alias` —— 執行時
+				// 才炸，而字串比對看不出來。`(pl.col("x") * 1.1).alias("x")` 才對。
+				return `(${expr}).alias(${pyStr(out)})`;
+			});
+			return `${id} = ${src}.with_columns([${parts.join(", ")}])`;
+		}
+
 		case "MULTI_ROW_FORMULA": {
 			const out = config?.outputColumn || "prev_amount";
 			const raw = safeExpr(config?.expression, "1");

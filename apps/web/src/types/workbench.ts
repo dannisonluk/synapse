@@ -28,6 +28,7 @@ export type AlteryxNodeType =
 	| "TRANSPOSE"
 	| "TEXT_TO_COLUMNS"
 	| "REGEX"
+	| "MULTI_FIELD_FORMULA"
 	| "MULTI_ROW_FORMULA"
 	| "RUNNING_TOTAL"
 	| "RANK"
@@ -93,6 +94,10 @@ export interface ASTNodeConfig {
 	replacement?: string;
 	/** REGEX：是否忽略大小寫（摺進 pattern 的 (?i)） */
 	caseInsensitive?: boolean;
+	/** MULTI_FIELD_FORMULA：OVERWRITE（就地改寫）| NEW_FIELD（每個欄位多一個新欄位） */
+	outputMode?: string;
+	/** MULTI_FIELD_FORMULA：NEW_FIELD 模式的新欄位後綴（空字串會被退回 "_new"） */
+	newFieldSuffix?: string;
 	/** 視窗節點：分區鍵、排序鍵、是否遞減 */
 	partitionBy?: string[];
 	orderBy?: string;

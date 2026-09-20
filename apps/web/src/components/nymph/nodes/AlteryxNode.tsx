@@ -15,7 +15,7 @@ import {
 } from "lucide-react";
 import { useTheme } from "../../../theme/ThemeContext";
 import { ikaros } from "../../../engine/ikaros/client";
-import { qi } from "../../../engine/sql";
+import { qi, hasCurrentField } from "../../../engine/sql";
 import {
 	useUpstreamColumns,
 	type UpstreamColumn,
@@ -89,6 +89,9 @@ export interface AlteryxNodeConfig {
 	pattern?: string;
 	replacement?: string;
 	caseInsensitive?: boolean;
+	/** MULTI_FIELD_FORMULA：OVERWRITE（就地改寫）| NEW_FIELD（新增欄位） */
+	outputMode?: string;
+	newFieldSuffix?: string;
 	/** 視窗節點：分區鍵、排序鍵、是否遞減 */
 	partitionBy?: string[];
 	orderBy?: string;
@@ -1692,7 +1695,70 @@ export const AlteryxNode: React.FC<NodeProps<Node<AlteryxNodeData>>> = ({
 					</div>
 				)}
 
-				{/* 18. MULTI_ROW_FORMULA 節點介面 */}
+				{/* 18. MULTI_FIELD_FORMULA 節點介面 */}
+				{nodeType === "MULTI_FIELD_FORMULA" && (
+					<div className={boxCls}>
+						<div className={titleCls}>Multi-Field Formula（一次改多欄）</div>
+						<FieldListEditor
+							listId={`mff-${id}`}
+							options={upstream.columns}
+							value={nameListOf("columns")}
+							onChange={(next) => setNameList("columns", next)}
+							placeholder="要套用的欄位（逗號分隔）"
+							hint="運算式會逐一套用到這些欄位；重複的欄位會被忽略"
+							inputClassName={inputCls}
+							chipClassName={chipCls}
+						/>
+						<input
+							value={config.expression ?? ""}
+							onChange={(e) =>
+								updateConfig("expression", e.target.value)
+							}
+							placeholder="運算式，例如 TRIM(_CurrentField_)"
+							className={`w-full ${inputCls}`}
+						/>
+						<div className="flex items-center space-x-1">
+							<select
+								value={config.outputMode || "OVERWRITE"}
+								onChange={(e) =>
+									updateConfig("outputMode", e.target.value)
+								}
+								className={`flex-1 ${inputCls}`}
+							>
+								<option value="OVERWRITE">就地改寫原欄位</option>
+								<option value="NEW_FIELD">新增欄位（保留原欄位）</option>
+							</select>
+							{(config.outputMode || "OVERWRITE") ===
+								"NEW_FIELD" && (
+								<input
+									value={config.newFieldSuffix ?? "_new"}
+									onChange={(e) =>
+										updateConfig(
+											"newFieldSuffix",
+											e.target.value,
+										)
+									}
+									placeholder="_new"
+									className={`w-24 ${inputCls}`}
+								/>
+							)}
+						</div>
+						{/* 少了 _CurrentField_ 時，SQL 與 Polars 都會退回 passthrough
+						    （見 astCompiler / exportPolars 的說明）—— 在這裡說清楚，
+						    否則使用者只會看到節點什麼都沒做。 */}
+						{!hasCurrentField(config.expression) && (
+							<div className="text-[9px] font-mono text-rose-500">
+								⚠ 運算式沒有用到 _CurrentField_ —— 節點會直接跳過，不會改動任何欄位
+							</div>
+						)}
+						<div className={hintCls}>
+							用 _CurrentField_ 代表當前欄位，例如
+							UPPER(_CurrentField_) 或 _CurrentField_ * 1.1
+						</div>
+					</div>
+				)}
+
+				{/* 19. MULTI_ROW_FORMULA 節點介面 */}
 				{nodeType === "MULTI_ROW_FORMULA" && (
 					<div className={boxCls}>
 						<div className={titleCls}>Multi-Row Formula（跨列）</div>
@@ -1745,7 +1811,7 @@ export const AlteryxNode: React.FC<NodeProps<Node<AlteryxNodeData>>> = ({
 					</div>
 				)}
 
-				{/* 18. RUNNING_TOTAL 節點介面 */}
+				{/* 20. RUNNING_TOTAL 節點介面 */}
 				{nodeType === "RUNNING_TOTAL" && (
 					<div className={boxCls}>
 						<div className={titleCls}>Running Total（累計）</div>
@@ -1793,7 +1859,7 @@ export const AlteryxNode: React.FC<NodeProps<Node<AlteryxNodeData>>> = ({
 					</div>
 				)}
 
-				{/* 19. RANK 節點介面 */}
+				{/* 21. RANK 節點介面 */}
 				{nodeType === "RANK" && (
 					<div className={boxCls}>
 						<div className={titleCls}>Rank（排名）</div>
@@ -1850,7 +1916,7 @@ export const AlteryxNode: React.FC<NodeProps<Node<AlteryxNodeData>>> = ({
 					</div>
 				)}
 
-				{/* 20. APPEND_FIELDS 節點介面 */}
+				{/* 22. APPEND_FIELDS 節點介面 */}
 				{nodeType === "APPEND_FIELDS" && (
 					<div className={boxCls}>
 						<div className={titleCls}>Append Fields（附加欄位）</div>
@@ -1864,7 +1930,7 @@ export const AlteryxNode: React.FC<NodeProps<Node<AlteryxNodeData>>> = ({
 					</div>
 				)}
 
-				{/* 21. FIND_REPLACE 節點介面 */}
+				{/* 23. FIND_REPLACE 節點介面 */}
 				{nodeType === "FIND_REPLACE" && (
 					<div className={boxCls}>
 						<div className={titleCls}>Find Replace（查找替換）</div>

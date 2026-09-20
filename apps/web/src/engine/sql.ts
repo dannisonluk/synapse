@@ -158,6 +158,55 @@ export function regexPattern(value: unknown, caseInsensitive: unknown): string {
 }
 
 /**
+ * MULTI_FIELD_FORMULA 的「當前欄位」佔位符。
+ *
+ * 沿用 Alteryx 的 `_CurrentField_`：使用者（或 LLM）只寫一次運算式，
+ * 節點把它套用到多個欄位上。比對刻意**不分大小寫** —— LLM 很常寫成
+ * `_currentfield_`，而兩種寫法只可能指同一個東西。
+ */
+const CURRENT_FIELD_TEST = /_CurrentField_/i;
+
+export function hasCurrentField(expr: unknown): boolean {
+	return CURRENT_FIELD_TEST.test(String(expr ?? ""));
+}
+
+/**
+ * 把 `_CurrentField_` 換成（已加引號的）欄位名；沒有佔位符就原樣回傳。
+ *
+ * 替換值用函式回傳而不是字串：字串替換會解讀 `$&` / `$1` / `$'`，
+ * 而欄位名是使用者可控的字串 —— 一個叫 `a$&b` 的欄位會讓替換結果
+ * 變成整段匹配。函式回傳不做任何解讀。
+ */
+export function applyCurrentField(expr: string, quotedField: string): string {
+	return String(expr).replace(/_CurrentField_/gi, () => quotedField);
+}
+
+/**
+ * MULTI_FIELD_FORMULA 的輸出模式白名單。
+ *   OVERWRITE → 就地改寫選取的欄位（`SELECT * REPLACE (…)`，欄位順序不變）
+ *   NEW_FIELD → 原欄位保留，每個選取欄位多一個新欄位
+ */
+const ALLOWED_MULTI_FIELD_OUTPUT_MODES = new Set(["OVERWRITE", "NEW_FIELD"]);
+
+export function safeMultiFieldOutputMode(m: unknown, fallback = "OVERWRITE"): string {
+	const normalized = String(m ?? "").trim().toUpperCase();
+	return ALLOWED_MULTI_FIELD_OUTPUT_MODES.has(normalized) ? normalized : fallback;
+}
+
+/**
+ * NEW_FIELD 模式的後綴。刻意不接受空字串。
+ *
+ * 實測（DuckDB 1.5.5 / Polars 1.44.2）：`SELECT *, UPPER("x") AS "x"` 會**安靜地**
+ * 產生兩個叫 `x` 的欄位，而 Polars 的 `.with_columns(… .alias("x"))` 是安靜地
+ * **就地取代**。空後綴等於讓兩個引擎在沒有任何警告的情況下做出不同的事，
+ * 所以這裡退回預設值，而不是把選擇權交給使用者。
+ */
+export function safeNewFieldSuffix(value: unknown, fallback = "_new"): string {
+	const raw = String(value ?? "").trim();
+	return raw === "" ? fallback : raw;
+}
+
+/**
  * FORMULA expression：本質上是自由 SQL 片段，無法完全參數化，
  * 因此做「結構性拒絕」—— 只擋多語句與註解，保留正常運算表達式。
  * （`;` 與 `--` / `/*` 在一個 scalar expression 內永遠不會合法）

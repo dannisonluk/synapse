@@ -394,6 +394,60 @@ export const NODE_CATALOG: Record<AlteryxNodeType, NodeSpec> = {
 		],
 	},
 
+	MULTI_FIELD_FORMULA: {
+		type: "MULTI_FIELD_FORMULA",
+		label: "Multi-Field Formula",
+		category: "Preparation",
+		description: "同一個運算式一次套用到多個欄位（用 _CurrentField_ 代表當前欄位）。",
+		whenToUse:
+			"使用者說「把這幾個欄位都 / 一次改多欄 / 所有欄位都套用同一個運算式 / multi-field formula」時。只改一個欄位請用 Formula。",
+		inputs: 1,
+		nodeType: "alteryxNode",
+		icon: "FunctionSquare",
+		color: "text-amber-600",
+		defaults: {
+			columns: [],
+			expression: "TRIM(_CurrentField_)",
+			outputMode: "OVERWRITE",
+			newFieldSuffix: "_new",
+		},
+		fields: [
+			{
+				name: "columns",
+				kind: "fieldList",
+				label: "要套用的欄位",
+				required: true,
+				hint: "運算式會逐一套用到這些欄位；重複的欄位會被忽略",
+			},
+			{
+				name: "expression",
+				kind: "text",
+				label: "運算式",
+				required: true,
+				// 這個 default 不只是給表單用的：verify 的「每個 config 欄位都真的
+				// 被讀到」探針會拿它當輸入。餵合成字串會讓運算式缺少 _CurrentField_，
+				// 節點於是走 passthrough，探針就分不出「沒讀」與「讀了但合法地沒做事」。
+				default: "TRIM(_CurrentField_)",
+				hint: "用 _CurrentField_ 代表當前欄位，例如 TRIM(_CurrentField_) 或 _CurrentField_ * 1.1",
+			},
+			{
+				name: "outputMode",
+				kind: "enum",
+				label: "輸出模式",
+				values: ["OVERWRITE", "NEW_FIELD"],
+				default: "OVERWRITE",
+				hint: "OVERWRITE → 就地改寫原欄位（欄位順序不變）；NEW_FIELD → 保留原欄位並新增一欄",
+			},
+			{
+				name: "newFieldSuffix",
+				kind: "text",
+				label: "新欄位後綴（NEW_FIELD）",
+				default: "_new",
+				hint: "不可為空 —— 空後綴會讓新欄位與原欄位同名，而兩個引擎對此的處理並不一致",
+			},
+		],
+	},
+
 	MULTI_ROW_FORMULA: {
 		type: "MULTI_ROW_FORMULA",
 		label: "Multi-Row Formula",

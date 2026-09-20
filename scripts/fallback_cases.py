@@ -27,6 +27,10 @@ CASES = [
     ("cumulative amount", ["INPUT_DUCKDB", "RUNNING_TOTAL"]),
     ("running total", ["INPUT_DUCKDB", "RUNNING_TOTAL"]),
     ("previous row amount", ["INPUT_DUCKDB", "MULTI_ROW_FORMULA"]),
+    # MULTI_ROW_FORMULA 是跨列、MULTI_FIELD_FORMULA 是跨欄 —— 這兩條釘住
+    # 「講多欄不要被當成跨列，講上一列也不要被當成多欄」。
+    ("multi-field formula on all fields", ["INPUT_DUCKDB", "MULTI_FIELD_FORMULA"]),
+    ("把所有欄位都套用 UPPER", ["INPUT_DUCKDB", "MULTI_FIELD_FORMULA"]),
     ("sort by amount", ["INPUT_DUCKDB", "SORT"]),
     ("chart of amount", ["INPUT_DUCKDB", "VIZ_CHART"]),
     ("total amount", ["INPUT_DUCKDB", "SUMMARIZE"]),

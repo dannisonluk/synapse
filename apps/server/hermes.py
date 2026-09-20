@@ -347,6 +347,16 @@ _FALLBACK_STEPS: List[Dict[str, Any]] = [
                    "partitionBy": [], "orderBy": "id", "descending": False},
     },
     {
+        # 與 MULTI_ROW_FORMULA 是兩個不同的東西（一個跨列、一個跨欄），
+        # 所以關鍵字刻意不重疊：這裡只認「多欄 / 所有欄位」這種講法。
+        # 單獨的 "formula" 不放進來 —— 它分不出是哪一種。
+        "patterns": ["multi-field formula", "multi field formula",
+                     "多欄運算式", "多欄公式", "所有欄位", "每個欄位", "一次改多欄"],
+        "type": "MULTI_FIELD_FORMULA", "label": "Multi-Field Formula",
+        "config": {"columns": ["item", "category"], "expression": "UPPER(_CurrentField_)",
+                   "outputMode": "OVERWRITE", "newFieldSuffix": "_new"},
+    },
+    {
         "patterns": ["sum", "avg", "total", "加總", "平均", "count", "合計",
                      "aggregat", "group", "按", "各"],
         "type": "SUMMARIZE", "label": "Summarize",

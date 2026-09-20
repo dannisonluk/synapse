@@ -22,6 +22,10 @@ import {
 	safeUnmatched,
 	safeRegexMode,
 	regexPattern,
+	safeMultiFieldOutputMode,
+	safeNewFieldSuffix,
+	hasCurrentField,
+	applyCurrentField,
 	intLit,
 } from "./sql";
 import type { Edge } from "@xyflow/react";
@@ -99,6 +103,9 @@ export interface NodeConfig {
 	pattern?: string;
 	replacement?: string;
 	caseInsensitive?: boolean;
+	/** MULTI_FIELD_FORMULA：OVERWRITE | NEW_FIELD */
+	outputMode?: string;
+	newFieldSuffix?: string;
 	/** 視窗節點 */
 	partitionBy?: string[];
 	orderBy?: string;
@@ -173,6 +180,18 @@ function toNameList(value: unknown, fallback: string[]): string[] {
 		.split(",")
 		.map((s) => s.trim())
 		.filter(Boolean);
+}
+
+/**
+ * 去重但保留順序。
+ *
+ * MULTI_FIELD_FORMULA 對同一個欄位套用兩次沒有任何意義，而且兩個引擎都會
+ * 直接報錯（DuckDB：`Duplicate entry "x" in REPLACE list`；Polars：
+ * `the name 'x' ... is duplicate`）。與其把使用者的筆誤丟成一個引擎錯誤，
+ * 不如在這裡收掉 —— 這是有損但無害的收斂。
+ */
+function dedupe(list: string[]): string[] {
+	return [...new Set(list)];
 }
 
 /**
@@ -653,6 +672,35 @@ export function compileNodeSelect(
 				`SELECT *, regexp_matches(${qi(field)}, ${pattern}) AS ${qi(out)} ` +
 				`FROM ${qi(sourceTable)}`
 			);
+		}
+
+		// ---------------------------------------------------------------
+		case "MULTI_FIELD_FORMULA": {
+			const cols = dedupe(toNameList(config.columns, []));
+			if (cols.length === 0) return `SELECT * FROM ${qi(sourceTable)}`;
+
+			const raw = safeExpr(config.expression, "1");
+			// 沒有 _CurrentField_ 就等於對每個欄位套用同一個常數運算式。
+			// 在 OVERWRITE 模式下那會把每一欄都寫成同一個值 —— 是不可逆的
+			// 資料破壞，而畫布上看起來完全正常。所以退回 passthrough，
+			// 由設定表單的提示告訴使用者少了佔位符。
+			if (!hasCurrentField(raw)) return `SELECT * FROM ${qi(sourceTable)}`;
+
+			const mode = safeMultiFieldOutputMode(config.outputMode);
+			if (mode === "NEW_FIELD") {
+				const suffix = safeNewFieldSuffix(config.newFieldSuffix);
+				const proj = cols.map(
+					(c) => `(${applyCurrentField(raw, qi(c))}) AS ${qi(c + suffix)}`,
+				);
+				return `SELECT *, ${proj.join(", ")} FROM ${qi(sourceTable)}`;
+			}
+
+			// OVERWRITE：`SELECT * REPLACE` 是就地改寫，欄位順序不變。
+			// 這也是 DATA_CLEANSING / IMPUTE 用的同一個慣用法。
+			const proj = cols.map(
+				(c) => `(${applyCurrentField(raw, qi(c))}) AS ${qi(c)}`,
+			);
+			return `SELECT * REPLACE (${proj.join(", ")}) FROM ${qi(sourceTable)}`;
 		}
 
 		// ---------------------------------------------------------------
