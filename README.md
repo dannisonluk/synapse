@@ -1,11 +1,11 @@
 # Synapse: Web-Based Visual Data Engineering Platform
-## Technical Architecture & System Specification (v1.2)
+## Technical Architecture & System Specification (v1.3)
 
 ---
 
 ## 1. Executive Summary
 
-**Synapse** is a modern, client-side visual data engineering platform. By combining an in-browser WebAssembly database (**DuckDB-WASM**) running inside a dedicated **Web Worker** (**Ikaros**), a React Flow canvas (**Nymph**), and an LLM agent layer (**Hermes**, plus the standalone **Daedalus** / **Chaos** endpoints), Synapse delivers a complete end-to-end data pipeline loop: turning natural language prompts into DAG topology, executing memory-native queries without backend roundtrips, and automatically repairing runtime exceptions.
+**Synapse** is a modern, client-side visual data engineering platform. By combining an in-browser WebAssembly database (**DuckDB-WASM**) running inside a dedicated **Web Worker** (**Ikaros**), a React Flow canvas (**Nymph**), and an LLM agent layer (**Hermes**, plus the **Chaos** self-repair endpoint), Synapse delivers a complete end-to-end data pipeline loop: turning natural language prompts into DAG topology, executing memory-native queries without backend roundtrips, and automatically repairing runtime exceptions.
 
 ### Core Value Proposition
 * **In-browser compute, off the main thread**: DuckDB-WASM is hosted inside a dedicated Web Worker. CSV/Parquet parsing, SQL execution and result materialisation all happen there, so the UI stays responsive on million-row files.
@@ -22,8 +22,8 @@
 | **UI / Canvas** | Nymph Canvas Engine | React 18, React Flow (`@xyflow/react`), Tailwind CSS | Visual DAG canvas, custom node/edge rendering, drag & drop, auto-layout, viewport focus. |
 | **In-Browser Compute** | Ikaros Engine | DuckDB-WASM, Web Worker, `@synapse/ikaros-arrow` | Worker lifecycle, in-memory SQL execution, file registration, result materialisation, BigInt normalisation. |
 | **AI Copilot** | Hermes Agent | FastAPI, LangChain, OpenRouter | Text-to-pipeline (`MUTATE_AST`) and inline calculation (`INLINE_SQL`). Its tool vocabulary and prompt schema are generated from the TypeScript node catalogue (`node_catalog.json`). |
-| **AI Architect** | Daedalus Agent | FastAPI, LangChain, OpenRouter | Standalone Text-to-DAG endpoint (`/api/v1/daedalus/generate`). Not currently called by the UI. |
 | **Self-Correction** | Chaos Agent | FastAPI, LangChain, OpenRouter | Runtime exception interception and SQL repair. |
+| **Payload Contract** | `@synapse/schema` | TypeScript, zod (sub-entry only) | The canonical shape of a backend payload, generated from the node catalogue. Zero-dependency table lookups for the canvas; zod schemas on the `./zod` sub-entry for the backend and the harness. |
 | **Orchestration** | Topological Scheduler | TypeScript (Kahn's Algorithm) | Dependency resolution, subgraph extraction, topological ordering, failure propagation. |
 
 ---
@@ -172,13 +172,28 @@ From that one declaration:
 * **The palette** is generated (`catalogByCategory()`), grouped in `CATEGORY_ORDER` = In/Out · Preparation · Transform · Join · BI.
 * **The config forms** are hand-written React, but a drift guard asserts that every declared field of every type is actually read by the compiler (see below).
 * **`patch.ts`** takes the node's `nodeType` and label from the spec, and runs the incoming config through **`normalizeConfig(type, config)`**, which drops hallucinated keys and back-fills declared defaults — so a model that invents `{"sortField": …}` cannot smuggle an unknown key into the graph.
-* **`scripts/gen_node_catalog.mjs`** bundles the catalogue with esbuild and writes `apps/server/node_catalog.json` (types, canvas hint keys, a ready-made prompt section, and the full node list). `hermes.py` **loads that file** and derives `VALID_NODE_TYPES`, its system-prompt schema block and its canvas-hint key list from it. `pnpm gen:catalog` regenerates; `pnpm check:catalog` exits non-zero if the committed JSON is stale. A hardcoded fallback (12 types) is kept for the case where the JSON is missing, and it prints a warning when used.
+* **`scripts/gen_node_catalog.mjs`** bundles the catalogue with esbuild and writes **two derived artefacts** from one snapshot:
+  1. `apps/server/node_catalog.json` (types, canvas hint keys, a ready-made prompt section, and the full node list). `hermes.py` **loads that file** and derives `VALID_NODE_TYPES`, its system-prompt schema block and its canvas-hint key list from it. A hardcoded fallback (12 types) is kept for the case where the JSON is missing, and it prints a warning when used.
+  2. `packages/synapse-schema/src/generated.ts` — the same facts as TypeScript (`NODE_TYPES`, `NODE_FIELDS`, `NODE_META`), typed as mapped types over `NodeType` so a missing entry is a `tsc` error.
 
-The drift guards live in the verification suite (§5, sections 10 and 14) and are deliberately **non-vacuous**:
+  `pnpm gen:catalog` regenerates both; `pnpm check:catalog` exits non-zero if either committed file is stale.
+
+### 3.7.1 `@synapse/schema` — the payload contract
+
+`packages/synapse-schema` used to be a **dead prototype**: its `NodeTypeEnum` listed `DATA_SOURCE / TRANSFORM / AGGREGATE / SQL_CUSTOM / CHART_BI`, none of which exist, and **no file in the entire git history ever imported it**. It now derives every fact from `generated.ts` and is split into two entry points for a reason:
+
+* `@synapse/schema` — **zero dependencies**. Pure table lookups over `generated.ts`: `isNodeType`, `unknownConfigKeys`, `missingRequiredFields`, `invalidEnumFields`, `auditAstPatch`. This is what `patch.ts` imports, so it costs the app nothing beyond ~6 kB raw (zod is *not* pulled in — asserted by bundling the entry with esbuild and inspecting the metafile).
+* `@synapse/schema/zod` — the actual zod schemas (`AstPatchSchema`, `NodeTypeEnum`, `nodeConfigSchema(type)`), built **programmatically** from `NODE_FIELDS`. Used by the verification harness and available to the backend.
+
+The reason this matters is the failure mode it closes. `resolveAstPatch` is deliberately **lenient** — an unknown type degrades to `FILTER`, unknown config keys are dropped — so a malformed payload never breaks the canvas. But that also meant "the backend sent something wrong" left **no trace at all**. `resolveAstPatch` now returns an `issues[]` array from `auditAstPatch()` (computed on the *raw* payload, before any coercion), and the canvas surfaces it as a warning banner. A payload carrying the `SQL_CUSTOM` that the removed `daedalus.py` used to emit now says so, instead of silently becoming a Filter.
+
+The drift guards live in the verification suite (§5, sections 10, 11 and 14) and are deliberately **non-vacuous**:
 
 * `compileNodeSelect()` has a `default:` branch that returns passthrough SQL, so "does type X work?" is true for *any* string. The guards therefore parse the real `case "X":` labels out of `astCompiler.ts` and `exportPolars.ts` **from source** and compare those sets to the catalogue.
 * One guard runs `hermes.py` **inside `apps/server/venv`** and asserts `VALID_NODE_TYPES == catalogue.types`. That single assertion is what makes "the agent understands the new tools" a fact rather than a claim.
-* `node_catalog.json` is byte-compared against a fresh generation, so a catalogue edit that is not regenerated fails CI.
+* Both derived artefacts are re-checked by invoking the generator's own `--check` mode, so the guard cannot drift from the generator (that would be a second copy of the renderer).
+* Section 11 asserts the schema **rejects** a non-catalogued type *and* **accepts all 15 real fallback pipelines** — a schema that is too strict is worse than none.
+* A general guard scans every `apps/server/*.py` for `"type": "<UPPER>"` literals and asserts each one is in the catalogue. That is what would have caught `daedalus.py` on the day it was written, rather than months later.
 
 ---
 
@@ -256,20 +271,29 @@ The server is **optional**. Without it the canvas, DuckDB execution, paging and 
 ```bash
 # from the monorepo root
 pnpm install
-pnpm --filter @synapse/ikaros-arrow build
-pnpm --filter @synapse/schema build
 
 pnpm --filter @synapse/web dev     # http://localhost:5173/
 ```
 
+> **No pre-build step is required for the workspace packages.** `@synapse/ikaros-arrow` and `@synapse/schema` expose their **TypeScript source** through `exports`, so Vite and esbuild compile them directly. Previously they exposed `dist/`, which is `.gitignore`d — so a fresh clone could not run `pnpm dev` or `vite build` until someone happened to run `tsc` in each package first, and `pnpm verify` could not see the problem because it never bundled `ikaros/core.ts`. Section 11 of the suite now asserts that no workspace package's `exports` resolve into `dist/`.
+
 ### Verification
 
 ```bash
-pnpm verify     # 457 assertions, all passing, zero skips
-pnpm check:catalog   # fails if apps/server/node_catalog.json is stale
+pnpm verify          # 476 assertions, all passing, zero skips
+pnpm check:catalog   # fails if either derived artefact is stale
 ```
 
 The count includes the Python backend suite (`scripts/verify_hermes.py`, 37 assertions) as well as the JavaScript ones — it previously excluded them, which under-reported the total.
+
+### Linting
+
+```bash
+pnpm install   # required once — see the note in §7
+pnpm lint      # eslint . --ext .ts,.tsx
+```
+
+A single root `.eslintrc.cjs` covers `apps/web` and `packages/*`. It is deliberately one config rather than one per package: pnpm's strict `node_modules` means every package would otherwise have to re-declare eslint and all four plugins, which is noise and one more thing to forget. The two rules that earn their keep are `react-hooks/rules-of-hooks` and `react-hooks/exhaustive-deps` — a wrong dependency array causes a stale closure and produces **no type error at all**, so `tsc` cannot catch it.
 
 `scripts/verify.mjs` bundles the **real** TypeScript modules with esbuild and exercises them in Node, then runs `scripts/verify_hermes.py` against the backend's pure functions using `apps/server/venv`. It covers:
 
@@ -284,6 +308,8 @@ The count includes the Python backend suite (`scripts/verify_hermes.py`, 37 asse
 9. **Autosave** — `engine/persistence.ts` takes an injectable storage object, so the failure modes that actually happen in browsers (quota exceeded, storage disabled in private mode, no `localStorage` at all) are asserted directly, including that none of them throw. The round trip is also asserted end-to-end: what autosave writes must be readable by `importWorkflowJson`, with a multi-aggregate `SUMMARIZE` config intact rather than silently downgraded to the old single-measure shape. Finally, the contract the "New" button and the restore guard depend on: an empty workflow is still a valid file, and a cleared autosave must read back as *nothing to restore* rather than as an empty workflow.
 10. **Node catalogue → backend sync (drift guard)** — `apps/server/node_catalog.json` must be byte-identical to a fresh generation, and `hermes.py` must be importable *in the venv* with `VALID_NODE_TYPES` exactly equal to the catalogue's type list, a prompt section that names every type, `_CANVAS_HINT_KEYS` matching the snapshot, and a keyword fallback whose every `"type": "X"` exists in the catalogue. This is the assertion that makes "the agent knows about the new tools" verifiable rather than aspirational.
 11. **End-to-end: prompt → fallback patch → canvas → SQL → real engine** — the last wasm section takes the deterministic fallback patches (`scripts/fallback_pipelines.py`, cases shared with the Python suite via `scripts/fallback_cases.py`) through `resolveAstPatch` → `exportToSqlCte` → the real DuckDB-WASM engine, and asserts every one of the 15 pipelines executes and returns rows. Sections 1–10 prove the compiler understands each tool and that the agent knows they exist; this one proves that **saying one sentence produces something that actually runs**. It also pins the substring-shadowing fix: the fallback's configs are hand-written strings (field names, aggregate functions, separators) that no engine had ever executed.
+
+12. **Repo consistency (static-scan guards)** — section 11 of the suite guards the things that are not engine logic: both derived artefacts are re-checked through the generator's own `--check` mode; `@synapse/schema` lists exactly the catalogue's types; bundling the schema's **main** entry does **not** pull zod in (the "zero dependency" claim, verified by inspecting esbuild's metafile rather than by trusting a comment); `AstPatchSchema` rejects a non-catalogued type *and* accepts all 15 real fallback pipelines; `auditAstPatch` reports all four issue kinds at once instead of stopping at the first; every `apps/server/*.py` `"type": "<UPPER>"` literal is in the catalogue; `turbo.json` carries no dead `tasks` key; no workspace package's `exports` resolve into the gitignored `dist/`; and the `lint` script really points at eslint with a config present.
 
 Nothing in the suite is a hand-copied reimplementation: every module is bundled from source, and several tests deliberately include the *old* broken logic (the naive `NOT (cond)`, the dangling `n0` resolver) to demonstrate that the bug it guards against was real.
 
@@ -345,7 +371,7 @@ Two habits follow from this, and they apply to any harness built this way:
 * **Python code export** — DONE (Polars); see suite 8. Pandas emission is not offered. `serializeArrowTable` / `parseArrowBuffer` in `@synapse/ikaros-arrow` remain unused.
 * **Alteryx tool coverage** — the eleven tools listed in §6 are done. Still absent: `REGEX` (regex parse/replace/match), `TEXT_TO_COLUMNS` by regex (only separator-split exists), `MULTI_FIELD_FORMULA`, `OVERSAMPLE`/`JOIN` fuzzy matching, `SPATIAL`, and the `IN_DB` / `OUTPUT` writers. Adding one is now a catalogue entry plus a compiler case plus an emitter — the palette, the config-form field list, the Hermes prompt and the drift guards all follow automatically.
 * **Workflow import of uploaded files** — a saved workflow records the *table name* for a file-backed input, not the file bytes. Reloading requires re-uploading the CSV/Parquet.
-* **Daedalus** — the `/api/v1/daedalus/generate` endpoint exists but nothing in the UI calls it; Hermes superseded it.
+* **ESLint has never actually been run.** `.eslintrc.cjs` exists and the root `lint` script points at eslint, but eslint is **not installed** and `pnpm-lock.yaml` has not been refreshed for it. This is not a stylistic omission — it is a known, self-healing gap: run `pnpm install` once and `pnpm lint` works. It was left this way deliberately rather than declaring no linter at all, and section 11 of the suite asserts that the config and the script stay consistent. Nothing else in the repo depends on eslint, so `build` / `dev` / `verify` are unaffected.
 * **COI / threaded DuckDB** — the `coi` bundle is not registered (it needs COOP+COEP headers and would add ~34 MB of wasm to the build). Re-enable in `bundles.ts` together with the headers.
 * **Component tests** — `pnpm verify` covers engine logic only; there is no React test runner configured.
 
@@ -369,5 +395,10 @@ Two habits follow from this, and they apply to any harness built this way:
 * Applying a Hermes patch re-lays-out the **entire** canvas, which moves manually positioned nodes.
 * Schema-driven pickers only know a column list once the upstream node has actually run; before that they fall back to free text and suppress the "column not found" warning rather than guess.
 * `onCanvasStateChange` is debounced (250 ms) and autosave is debounced (800 ms), so the DAG context Hermes receives can trail the canvas by up to a quarter second.
+* **`turbo.json` used the wrong key for the installed turbo — fixed.** The file said `"tasks"`, which is turbo **2.x** syntax; the pinned turbo is **1.13.4**, which only understands `"pipeline"`. Every root script that went through turbo (`build`, `dev`, `lint`, `clean`) therefore failed immediately with `Found an unknown key 'tasks'` — and because `verify` does not use turbo, nothing caught it. The dead `lint` and `clean` tasks were removed at the same time: no package ever implemented them. `clean` is now `node scripts/clean.mjs`, and section 11 asserts the key.
+* **The workspace packages exposed a `dist/` that does not exist in a fresh clone — fixed.** `@synapse/ikaros-arrow` and `@synapse/schema` had `exports` pointing at `./dist/index.js`, but `dist/` is in `.gitignore`. So `pnpm dev` and `vite build` on a fresh clone failed with a module-not-found until someone ran `tsc` inside each package — and `pnpm verify` **could not see it**, because it never bundled `ikaros/core.ts`, the only file that imports the package. Both packages now expose `src/index.ts` directly and their `build` is `tsc --noEmit`; the build-order coupling is gone entirely rather than merely documented.
+* **A `grep`-style guard must assert on the right thing.** The first version of the "dead code is gone" check searched the whole repo for the string `SQL_CUSTOM` — which of course matched the four comments *explaining that it was removed*, plus the assertion itself. It was replaced with a general rule that is both stricter and more useful: scan every `apps/server/*.py` for `"type": "<UPPER>"` literals and require each to be a catalogued type. That catches the *class* of bug (`daedalus.py` inventing a type the catalogue has never heard of) rather than one instance of it — and it is guarded against becoming vacuous by asserting the scan found something.
+* **A schema that is too strict is worse than no schema.** `AstPatchSchema` is deliberately lenient about *presence* (every field is `.optional().nullable()`) and strict about *structure* (unknown type, unknown config key, illegal enum value). Making required fields mandatory would reject normal agent output, so the suite asserts **both** directions: it rejects `SQL_CUSTOM`, and it accepts all 15 real fallback pipelines.
+* **Zod must not reach the app bundle.** The payload contract is split into a zero-dependency main entry (table lookups, what `patch.ts` imports) and a `./zod` sub-entry. Rather than trusting the comment, section 11 bundles the main entry with esbuild and asserts `zod` appears nowhere in the metafile's input list. Measured cost of the whole change to the app bundle: **+5.98 kB raw / +1.20 kB gzip**.
 * Exported CTE SQL does not embed file-backed inputs — `read_csv_auto` / `read_parquet` calls for uploaded files are listed as external sources rather than inlined, so the script needs the file registered first. The Polars export does emit a `read_csv` / `read_parquet` call, but only with the original filename, so the path usually needs adjusting.
 * The root `.env` holds live API keys and is gitignored — keep it that way.
