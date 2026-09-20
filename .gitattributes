@@ -6,6 +6,9 @@
 # fresh generation, and core.autocrlf would otherwise turn its LF into CRLF on a
 # fresh clone and fail the guard for no real reason.
 apps/server/node_catalog.json text eol=lf
+# Same reasoning for the second generated artefact (the TypeScript mirror that
+# @synapse/schema reads). Both are checked by the same `--check` run.
+packages/synapse-schema/src/generated.ts text eol=lf
 
 # Shell scripts must keep LF or they will not run.
 *.sh text eol=lf
