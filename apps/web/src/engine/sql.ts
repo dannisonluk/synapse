@@ -127,6 +127,37 @@ export function safeSampleMode(m: unknown, fallback = "FIRST"): string {
 }
 
 /**
+ * REGEX 模式白名單。
+ *   MATCH   → 布林欄位（regexp_matches）
+ *   PARSE   → 每個 capture group 一個欄位（regexp_extract）
+ *   REPLACE → 取代所有命中（regexp_replace ... 'g'）
+ */
+const ALLOWED_REGEX_MODES = new Set(["MATCH", "PARSE", "REPLACE"]);
+
+export function safeRegexMode(m: unknown, fallback = "MATCH"): string {
+	const normalized = String(m ?? "").trim().toUpperCase();
+	return ALLOWED_REGEX_MODES.has(normalized) ? normalized : fallback;
+}
+
+/**
+ * 把「忽略大小寫」折進 pattern，而不是走各引擎各自的旗標參數。
+ *
+ * 為什麼：DuckDB 是 `regexp_replace(s, p, r, 'gi')`，Polars 是
+ * `.str.contains(p)` —— Polars 的多數 str 方法根本沒有 case 參數。
+ * 但兩邊的 regex 引擎（RE2 / Rust regex）都支援 inline flag `(?i)`，
+ * 所以在 pattern 前面加 `(?i)` 是唯一能讓兩份輸出語意一致的做法。
+ * 已實測：`regexp_matches('abc','(?i)B')` 與
+ * `pl.col('s').str.contains('(?i)B')` 都回 True。
+ */
+export function regexPattern(value: unknown, caseInsensitive: unknown): string {
+	const raw = String(value ?? "");
+	if (!raw) return raw;
+	// 已經自帶 inline flag 就不要重複加，避免 `(?i)(?i)x`
+	if (/^\(\?[a-zA-Z]*i[a-zA-Z]*\)/.test(raw)) return raw;
+	return caseInsensitive ? `(?i)${raw}` : raw;
+}
+
+/**
  * FORMULA expression：本質上是自由 SQL 片段，無法完全參數化，
  * 因此做「結構性拒絕」—— 只擋多語句與註解，保留正常運算表達式。
  * （`;` 與 `--` / `/*` 在一個 scalar expression 內永遠不會合法）

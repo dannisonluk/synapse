@@ -14,7 +14,7 @@
 import type { Edge, Node } from "@xyflow/react";
 import { orderUpstreamSources, topologicalSort } from "./scheduler";
 import { resolveSourceTables, falseBranchTable } from "./astCompiler";
-import { safeOp, safeFunc, safeJoinType, safeExpr, safeUnionMode, safeSampleMode, safeImputeMethod, safeRankMethod, safeUnmatched, intLit } from "./sql";
+import { safeOp, safeFunc, safeJoinType, safeExpr, safeUnionMode, safeSampleMode, safeImputeMethod, safeRankMethod, safeUnmatched, safeRegexMode, regexPattern, intLit } from "./sql";
 
 // ---------------------------------------------------------------------------
 // Python literal / identifier
@@ -647,6 +647,51 @@ function emitNode(
 					`pl.col(${pyStr(field)}).str.split(${pyStr(sep)}).list.get(${i}, null_on_oob=True).alias(${pyStr(n)})`,
 			);
 			return `${id} = ${src}.with_columns([${parts.join(", ")}])`;
+		}
+
+		case "REGEX": {
+			const field = config?.field || "name";
+			const rawPattern = String(config?.pattern ?? "");
+			if (!rawPattern) return `${id} = ${src}  # 未設定樣式 → passthrough`;
+			// 與 astCompiler 共用 regexPattern：忽略大小寫以 inline (?i) 表示，
+			// 因為 Polars 的 str.extract / str.replace_all 根本沒有 case 參數。
+			const pattern = pyStr(regexPattern(rawPattern, config?.caseInsensitive));
+			const mode = safeRegexMode(config?.regexMode);
+
+			if (mode === "PARSE") {
+				const names = nameList(config?.outputColumns);
+				if (names.length === 0) {
+					return `${id} = ${src}  # 未設定擷取欄位 → passthrough`;
+				}
+				// 已實測的跨引擎差異：未命中時 DuckDB 的 regexp_extract 回**空字串**，
+				// Polars 的 str.extract 回 null。SQL 那邊刻意不加 COALESCE ——
+				// 「沒有命中」與「命中到空字串」本來就是不同的事，硬要統一會讓
+				// SQL 那份也失去這個區分。這裡只記錄，不假裝兩邊一樣。
+				ctx.notes.push(
+					`節點 ${id}：未命中時 regexp_extract 回空字串、Polars 的 str.extract 回 null`,
+				);
+				const parts = names.map(
+					(n: string, i: number) =>
+						`pl.col(${pyStr(field)}).str.extract(${pattern}, group_index=${i + 1}).alias(${pyStr(n)})`,
+				);
+				return `${id} = ${src}.with_columns([${parts.join(", ")}])`;
+			}
+
+			if (mode === "REPLACE") {
+				const out = config?.outputColumn || "regex_replaced";
+				// replace_all 對應 SQL 的 regexp_replace(..., 'g')
+				return (
+					`${id} = ${src}.with_columns(` +
+					`pl.col(${pyStr(field)}).str.replace_all(${pattern}, ` +
+					`${pyStr(String(config?.replacement ?? ""))}).alias(${pyStr(out)}))`
+				);
+			}
+
+			const out = config?.outputColumn || "regex_match";
+			return (
+				`${id} = ${src}.with_columns(` +
+				`pl.col(${pyStr(field)}).str.contains(${pattern}).alias(${pyStr(out)}))`
+			);
 		}
 
 		// ---------------------------------------------------------------

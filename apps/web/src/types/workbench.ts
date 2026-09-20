@@ -27,6 +27,7 @@ export type AlteryxNodeType =
 	| "CROSS_TAB"
 	| "TRANSPOSE"
 	| "TEXT_TO_COLUMNS"
+	| "REGEX"
 	| "MULTI_ROW_FORMULA"
 	| "RUNNING_TOTAL"
 	| "RANK"
@@ -84,6 +85,14 @@ export interface ASTNodeConfig {
 	/** TEXT_TO_COLUMNS：分隔符與切出來的欄位名 */
 	separator?: string;
 	outputColumns?: string[];
+	/** REGEX：MATCH | PARSE | REPLACE */
+	regexMode?: string;
+	/** REGEX 樣式（RE2 / Rust regex 共同語法；忽略大小寫以 inline (?i) 表示） */
+	pattern?: string;
+	/** REGEX：REPLACE 的取代字串（支援 \1 反向參照） */
+	replacement?: string;
+	/** REGEX：是否忽略大小寫（摺進 pattern 的 (?i)） */
+	caseInsensitive?: boolean;
 	/** 視窗節點：分區鍵、排序鍵、是否遞減 */
 	partitionBy?: string[];
 	orderBy?: string;

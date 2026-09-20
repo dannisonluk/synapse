@@ -20,6 +20,8 @@ import {
 	safeImputeMethod,
 	safeRankMethod,
 	safeUnmatched,
+	safeRegexMode,
+	regexPattern,
 	intLit,
 } from "./sql";
 import type { Edge } from "@xyflow/react";
@@ -92,6 +94,11 @@ export interface NodeConfig {
 	/** TEXT_TO_COLUMNS */
 	separator?: string;
 	outputColumns?: string[];
+	/** REGEX：MATCH | PARSE | REPLACE */
+	regexMode?: string;
+	pattern?: string;
+	replacement?: string;
+	caseInsensitive?: boolean;
 	/** 視窗節點 */
 	partitionBy?: string[];
 	orderBy?: string;
@@ -609,6 +616,43 @@ export function compileNodeSelect(
 					`(string_split(${qi(field)}, ${strLit(sep)}))[${i + 1}] AS ${qi(n)}`,
 			);
 			return `SELECT *, ${proj.join(", ")} FROM ${qi(sourceTable)}`;
+		}
+
+		case "REGEX": {
+			const field = config.field || "name";
+			const rawPattern = String(config.pattern ?? "");
+			// 沒有樣式就 passthrough —— 寧可什麼都不做，也不要產生一個永遠 false 的欄位
+			if (!rawPattern) return `SELECT * FROM ${qi(sourceTable)}`;
+			// 忽略大小寫摺進 pattern 的 inline (?i)，兩個引擎的 regex 都支援；
+			// 不走各引擎自己的旗標參數（Polars 多數 str 方法根本沒有 case 參數）。
+			const pattern = strLit(regexPattern(rawPattern, config.caseInsensitive));
+			const mode = safeRegexMode(config.regexMode);
+
+			if (mode === "PARSE") {
+				const names = toNameList(config.outputColumns, []);
+				if (names.length === 0) return `SELECT * FROM ${qi(sourceTable)}`;
+				// group 由 1 起算。實測：未命中時 DuckDB 回**空字串**而不是 NULL，
+				// 而 Polars 的 str.extract 回 NULL —— 這是已記錄的跨引擎差異。
+				const proj = names.map(
+					(n, i) => `regexp_extract(${qi(field)}, ${pattern}, ${i + 1}) AS ${qi(n)}`,
+				);
+				return `SELECT *, ${proj.join(", ")} FROM ${qi(sourceTable)}`;
+			}
+
+			if (mode === "REPLACE") {
+				const out = config.outputColumn || "regex_replaced";
+				// 'g' = 全域取代（Alteryx RegEx Replace 的語意）；不加旗標只換第一個命中
+				return (
+					`SELECT *, regexp_replace(${qi(field)}, ${pattern}, ` +
+					`${strLit(config.replacement ?? "")}, 'g') AS ${qi(out)} FROM ${qi(sourceTable)}`
+				);
+			}
+
+			const out = config.outputColumn || "regex_match";
+			return (
+				`SELECT *, regexp_matches(${qi(field)}, ${pattern}) AS ${qi(out)} ` +
+				`FROM ${qi(sourceTable)}`
+			);
 		}
 
 		// ---------------------------------------------------------------

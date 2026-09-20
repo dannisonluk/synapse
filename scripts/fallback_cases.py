@@ -17,6 +17,10 @@ CASES = [
     ("impute missing amount", ["INPUT_DUCKDB", "IMPUTE"]),
     ("clean whitespace", ["INPUT_DUCKDB", "DATA_CLEANSING"]),
     ("split item by comma", ["INPUT_DUCKDB", "TEXT_TO_COLUMNS"]),
+    # REGEX 的關鍵字刻意與 TEXT_TO_COLUMNS 分開：單講「split」不該拉進 REGEX，
+    # 單講「regex」也不該被當成拆欄。這兩條就是在釘住那條界線。
+    ("regex extract digits from item", ["INPUT_DUCKDB", "REGEX"]),
+    ("用正規表示式擷取 item 裡的數字", ["INPUT_DUCKDB", "REGEX"]),
     ("pivot category", ["INPUT_DUCKDB", "CROSS_TAB"]),
     ("unpivot amount", ["INPUT_DUCKDB", "TRANSPOSE"]),
     ("rank by amount", ["INPUT_DUCKDB", "RANK"]),

@@ -304,6 +304,15 @@ _FALLBACK_STEPS: List[Dict[str, Any]] = [
         "config": {"field": "item", "separator": ",", "outputColumns": ["part_1", "part_2"]},
     },
     {
+        # 這裡刻意不放單獨的 "match"：它在英文裡太泛，會把「match the rows」這種
+        # 其實想篩選的句子也拉進 REGEX。要 MATCH 模式請連 "regex" 一起講。
+        "patterns": ["regex", "regular expression", "正規表示式", "正則",
+                     "pattern", "樣式比對", "擷取", "抽出", "extract", "replace", "取代"],
+        "type": "REGEX", "label": "RegEx",
+        "config": {"field": "item", "regexMode": "MATCH", "pattern": "\\d+",
+                   "caseInsensitive": False, "outputColumn": "regex_match"},
+    },
+    {
         "patterns": ["filter", "過濾", "only", "where", "大於", "小於", "篩選"],
         "type": "FILTER", "label": "Filter",
         "config": {"field": "amount", "op": ">", "val": "1000"},

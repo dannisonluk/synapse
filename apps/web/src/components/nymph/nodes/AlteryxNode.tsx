@@ -84,6 +84,11 @@ export interface AlteryxNodeConfig {
 	/** TEXT_TO_COLUMNS：分隔符與切出來的欄位名 */
 	separator?: string;
 	outputColumns?: string[];
+	/** REGEX：MATCH | PARSE | REPLACE */
+	regexMode?: string;
+	pattern?: string;
+	replacement?: string;
+	caseInsensitive?: boolean;
 	/** 視窗節點：分區鍵、排序鍵、是否遞減 */
 	partitionBy?: string[];
 	orderBy?: string;
@@ -1588,7 +1593,106 @@ export const AlteryxNode: React.FC<NodeProps<Node<AlteryxNodeData>>> = ({
 					</div>
 				)}
 
-				{/* 17. MULTI_ROW_FORMULA 節點介面 */}
+				{/* 17. REGEX 節點介面 */}
+				{nodeType === "REGEX" && (
+					<div className={boxCls}>
+						<div className={titleCls}>RegEx（正規表示式）</div>
+						<div className="flex items-center space-x-1">
+							<select
+								value={config.regexMode || "MATCH"}
+								onChange={(e) =>
+									updateConfig("regexMode", e.target.value)
+								}
+								className={`w-24 ${inputCls}`}
+							>
+								<option value="MATCH">MATCH</option>
+								<option value="PARSE">PARSE</option>
+								<option value="REPLACE">REPLACE</option>
+							</select>
+							<FieldInput
+								listId={`regex-${id}`}
+								options={upstream.columns}
+								value={config.field || ""}
+								onValueChange={(v) => updateConfig("field", v)}
+								placeholder="來源欄位"
+								className={`flex-1 ${inputCls}`}
+							/>
+						</div>
+						<input
+							value={config.pattern ?? ""}
+							onChange={(e) => updateConfig("pattern", e.target.value)}
+							placeholder={"樣式，例如 ([A-Z]{2})-(\\d+)"}
+							className={`w-full ${inputCls}`}
+						/>
+						<label className="flex items-center space-x-1 text-[9px] font-mono opacity-70">
+							<input
+								type="checkbox"
+								checked={config.caseInsensitive === true}
+								onChange={(e) =>
+									updateConfigValue({
+										caseInsensitive: e.target.checked,
+									})
+								}
+							/>
+							<span>忽略大小寫（摺進樣式的 (?i)）</span>
+						</label>
+
+						{(config.regexMode || "MATCH") === "PARSE" ? (
+							<FieldListEditor
+								listId={`regexout-${id}`}
+								options={[]}
+								value={nameListOf("outputColumns")}
+								onChange={(next) =>
+									setNameList("outputColumns", next)
+								}
+								placeholder="擷取欄位名（逗號分隔）"
+								hint="依序對應第 1、2、3… 個 capture group；未命中時 DuckDB 回空字串、Polars 回 NULL"
+								inputClassName={inputCls}
+								chipClassName={chipCls}
+							/>
+						) : (
+							<div className="flex items-center space-x-1">
+								<input
+									value={
+										config.outputColumn ??
+										((config.regexMode || "MATCH") ===
+										"REPLACE"
+											? "regex_replaced"
+											: "regex_match")
+									}
+									onChange={(e) =>
+										updateConfig(
+											"outputColumn",
+											e.target.value,
+										)
+									}
+									placeholder="輸出欄位"
+									className={`flex-1 ${inputCls}`}
+								/>
+								{(config.regexMode || "MATCH") ===
+									"REPLACE" && (
+									<input
+										value={config.replacement ?? ""}
+										onChange={(e) =>
+											updateConfig(
+												"replacement",
+												e.target.value,
+											)
+										}
+										placeholder={"取代字串（\\1 反向參照）"}
+										className={`flex-1 ${inputCls}`}
+									/>
+								)}
+							</div>
+						)}
+						<MissingFieldWarning
+							field={config.field}
+							options={upstream.columns}
+						/>
+					</div>
+				)}
+
+				{/* 18. MULTI_ROW_FORMULA 節點介面 */}
 				{nodeType === "MULTI_ROW_FORMULA" && (
 					<div className={boxCls}>
 						<div className={titleCls}>Multi-Row Formula（跨列）</div>

@@ -329,6 +329,71 @@ export const NODE_CATALOG: Record<AlteryxNodeType, NodeSpec> = {
 		],
 	},
 
+	REGEX: {
+		type: "REGEX",
+		label: "RegEx",
+		category: "Preparation",
+		description: "用正規表示式比對、擷取或取代字串（MATCH / PARSE / REPLACE 三種模式）。",
+		whenToUse:
+			"使用者說「正規表示式 / regex / pattern / 樣式比對 / 擷取 / 抽出 / 取代」時。單純按分隔符拆欄請用 Text to Columns。",
+		inputs: 1,
+		nodeType: "alteryxNode",
+		icon: "Regex",
+		color: "text-violet-600",
+		defaults: {
+			field: "",
+			regexMode: "MATCH",
+			pattern: "",
+			caseInsensitive: false,
+			outputColumn: "regex_match",
+			replacement: "",
+			outputColumns: [],
+		},
+		fields: [
+			{ name: "field", kind: "field", label: "來源欄位", required: true },
+			{
+				name: "regexMode",
+				kind: "enum",
+				label: "模式",
+				values: ["MATCH", "PARSE", "REPLACE"],
+				default: "MATCH",
+				hint: "MATCH → 布林欄位；PARSE → 每個 capture group 一欄；REPLACE → 取代所有命中",
+			},
+			{
+				name: "pattern",
+				kind: "text",
+				label: "樣式",
+				required: true,
+				hint: "RE2 / Rust regex 的共同語法（不支援 lookaround）；擷取用 (...) 分組",
+			},
+			{
+				name: "caseInsensitive",
+				kind: "boolean",
+				label: "忽略大小寫",
+				default: false,
+				hint: "以 inline (?i) 摺進樣式 —— 兩個引擎的 regex 都支援",
+			},
+			{
+				name: "outputColumn",
+				kind: "text",
+				label: "輸出欄位（MATCH / REPLACE）",
+				default: "regex_match",
+			},
+			{
+				name: "replacement",
+				kind: "text",
+				label: "取代字串（REPLACE）",
+				hint: "支援 \\1 \\2 反向參照",
+			},
+			{
+				name: "outputColumns",
+				kind: "textList",
+				label: "擷取欄位（PARSE）",
+				hint: "依序對應第 1、2、3… 個 capture group；未命中時 DuckDB 回空字串、Polars 回 NULL",
+			},
+		],
+	},
+
 	MULTI_ROW_FORMULA: {
 		type: "MULTI_ROW_FORMULA",
 		label: "Multi-Row Formula",
