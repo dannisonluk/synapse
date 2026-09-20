@@ -1064,6 +1064,20 @@ const CanvasInner: React.FC<NymphCanvasProps> = ({
 				);
 			}
 
+			// 後端給了目錄以外的東西（未知型別、幻覺 config 鍵、非法 enum 值…）。
+			// resolveAstPatch 已經把它擋下來了，所以畫布不會壞；但這件事本身必須
+			// 講出來 —— 靜默退化正是「看起來有動、其實做錯事」的來源。
+			if (resolved.issues.length > 0) {
+				const shown = resolved.issues.slice(0, 3).map((i) => i.detail).join("；");
+				const rest =
+					resolved.issues.length > 3 ? `（另有 ${resolved.issues.length - 3} 項）` : "";
+				console.warn("[Hermes] payload 不符節點目錄：", resolved.issues);
+				setNotice({
+					kind: "error",
+					text: `Hermes payload 有 ${resolved.issues.length} 處不符節點目錄：${shown}${rest}`,
+				});
+			}
+
 			// 一次性更新：不可在 setNodes 的 updater 內再 call setEdges
 			// （StrictMode 會重複執行 updater → 重複邊線）
 			const mergedNodes = recompileDownstreamNodes(

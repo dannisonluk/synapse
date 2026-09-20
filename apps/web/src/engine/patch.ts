@@ -12,6 +12,9 @@
 //   每個節點都各自讀 raw_data，pipeline 等於沒有連過。
 
 import type { Edge, Node } from "@xyflow/react";
+// 稽核工具來自 @synapse/schema 的**主要**入口（零依賴，不拉 zod）。
+// 需要真正的 schema 驗證時走子入口 "@synapse/schema/zod"。
+import { auditAstPatch, type PatchIssue } from "@synapse/schema";
 import { NODE_CATALOG, normalizeConfig } from "./nodeCatalog";
 import type { AlteryxNodeType } from "../types/workbench";
 
@@ -61,6 +64,15 @@ export interface ResolutionResult {
 	edges: ResolvedEdge[];
 	/** 因為對照不到節點而丟棄的邊數（> 0 應該 warn） */
 	droppedEdges: number;
+	/**
+	 * 後端 payload 相對目錄的結構問題（未知型別、幻覺 config 鍵、非法 enum 值…）。
+	 *
+	 * 為什麼要有：`resolveAstPatch` 的設計是**寬鬆**的 —— 未知型別退回 FILTER、
+	 * 未知鍵被 normalizeConfig 丟掉，好處是壞 payload 不會讓畫布整片掛掉，
+	 * 代價是「後端給了錯的東西」這件事本身沒有任何痕跡。
+	 * 這裡把那些痕跡留下來，交給呼叫端顯示，而不是靜默吞掉。
+	 */
+	issues: PatchIssue[];
 }
 
 const DEFAULT_NODE_TYPE = "FILTER";
@@ -150,7 +162,9 @@ export function resolveAstPatch(
 		});
 	}
 
-	return { nodes, edges, droppedEdges };
+	// 稽核的是**原始** payload（未經上面的型別退回與 config 正規化），
+	// 否則 `SQL_CUSTOM → FILTER` 這種退化在事後就完全看不出來了。
+	return { nodes, edges, droppedEdges, issues: auditAstPatch(patch) };
 }
 
 /** 幫解析結果掛上 React Flow 需要的欄位（type / animated / id） */
