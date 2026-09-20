@@ -207,6 +207,18 @@ export function safeNewFieldSuffix(value: unknown, fallback = "_new"): string {
 }
 
 /**
+ * TEXT_TO_COLUMNS 的切分方式白名單。
+ *   SEPARATOR → 字面分隔符（`string_split` / `.str.split(literal=True)`）
+ *   REGEX     → 樣式切分（`regexp_split_to_array` / `.str.split(literal=False)`）
+ */
+const ALLOWED_SPLIT_MODES = new Set(["SEPARATOR", "REGEX"]);
+
+export function safeSplitMode(m: unknown, fallback = "SEPARATOR"): string {
+	const normalized = String(m ?? "").trim().toUpperCase();
+	return ALLOWED_SPLIT_MODES.has(normalized) ? normalized : fallback;
+}
+
+/**
  * FORMULA expression：本質上是自由 SQL 片段，無法完全參數化，
  * 因此做「結構性拒絕」—— 只擋多語句與註解，保留正常運算表達式。
  * （`;` 與 `--` / `/*` 在一個 scalar expression 內永遠不會合法）

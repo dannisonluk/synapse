@@ -92,6 +92,8 @@ export interface AlteryxNodeConfig {
 	/** MULTI_FIELD_FORMULA：OVERWRITE（就地改寫）| NEW_FIELD（新增欄位） */
 	outputMode?: string;
 	newFieldSuffix?: string;
+	/** TEXT_TO_COLUMNS：SEPARATOR（字面）| REGEX（樣式切分） */
+	splitMode?: string;
 	/** 視窗節點：分區鍵、排序鍵、是否遞減 */
 	partitionBy?: string[];
 	orderBy?: string;
@@ -1570,14 +1572,44 @@ export const AlteryxNode: React.FC<NodeProps<Node<AlteryxNodeData>>> = ({
 								placeholder="來源欄位"
 								className={`flex-1 ${inputCls}`}
 							/>
+							<select
+								value={config.splitMode || "SEPARATOR"}
+								onChange={(e) =>
+									updateConfig("splitMode", e.target.value)
+								}
+								className={`w-28 ${inputCls}`}
+							>
+								<option value="SEPARATOR">字面分隔符</option>
+								<option value="REGEX">正規表示式</option>
+							</select>
+						</div>
+						<div className="flex items-center space-x-1">
 							<input
 								value={config.separator ?? ","}
 								onChange={(e) =>
 									updateConfig("separator", e.target.value)
 								}
-								placeholder="分隔符"
-								className={`w-14 ${inputCls}`}
+								placeholder={
+									(config.splitMode || "SEPARATOR") === "REGEX"
+										? "樣式，例如 \\s+"
+										: "分隔符，例如 ,"
+								}
+								className={`flex-1 ${inputCls}`}
 							/>
+							{(config.splitMode || "SEPARATOR") === "REGEX" && (
+								<label className="flex items-center space-x-1 text-[9px] font-mono opacity-70">
+									<input
+										type="checkbox"
+										checked={config.caseInsensitive === true}
+										onChange={(e) =>
+											updateConfigValue({
+												caseInsensitive: e.target.checked,
+											})
+										}
+									/>
+									<span>忽略大小寫</span>
+								</label>
+							)}
 						</div>
 						<FieldListEditor
 							listId={`t2cout-${id}`}
@@ -1589,6 +1621,11 @@ export const AlteryxNode: React.FC<NodeProps<Node<AlteryxNodeData>>> = ({
 							inputClassName={inputCls}
 							chipClassName={chipCls}
 						/>
+						<div className={hintCls}>
+							{(config.splitMode || "SEPARATOR") === "REGEX"
+								? "樣式是 RE2 / Rust regex 語法；空樣式會跳過這個節點"
+								: "字面比對，不需要跳脫特殊字元"}
+						</div>
 						<MissingFieldWarning
 							field={config.field}
 							options={upstream.columns}

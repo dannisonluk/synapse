@@ -304,6 +304,16 @@ _FALLBACK_STEPS: List[Dict[str, Any]] = [
         "config": {"field": "item", "separator": ",", "outputColumns": ["part_1", "part_2"]},
     },
     {
+        # 正規表示式拆欄。放在上一步的後面，並且刻意用更長的關鍵字：
+        # 遮蔽規則是「短關鍵字藏在長關鍵字裡就讓位」，所以
+        # "split by regex" 會同時蓋掉上一步的 "split" 與 REGEX 步的 "regex" ——
+        # 使用者要的是「一個用樣式切分的節點」，不是「先拆欄再跑 regex」。
+        "patterns": ["split by regex", "regex split", "用樣式拆欄", "正規表示式拆欄"],
+        "type": "TEXT_TO_COLUMNS", "label": "Text to Columns (RegEx)",
+        "config": {"field": "item", "separator": "\\s*,\\s*", "splitMode": "REGEX",
+                   "outputColumns": ["part_1", "part_2"]},
+    },
+    {
         # 這裡刻意不放單獨的 "match"：它在英文裡太泛，會把「match the rows」這種
         # 其實想篩選的句子也拉進 REGEX。要 MATCH 模式請連 "regex" 一起講。
         "patterns": ["regex", "regular expression", "正規表示式", "正則",

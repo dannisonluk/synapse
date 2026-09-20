@@ -17,6 +17,11 @@ CASES = [
     ("impute missing amount", ["INPUT_DUCKDB", "IMPUTE"]),
     ("clean whitespace", ["INPUT_DUCKDB", "DATA_CLEANSING"]),
     ("split item by comma", ["INPUT_DUCKDB", "TEXT_TO_COLUMNS"]),
+    # 「用樣式拆欄」必須只產生**一個**節點：字面拆欄的 "split" 與 REGEX 的
+    # "regex" 都藏在 "split by regex" 裡面，遮蔽規則會讓它們兩個都讓位。
+    # 不遮蔽的話會變成 INPUT → TEXT_TO_COLUMNS → REGEX 兩個節點 ——
+    # 不報錯，只是多拆一次。
+    ("split by regex", ["INPUT_DUCKDB", "TEXT_TO_COLUMNS"]),
     # REGEX 的關鍵字刻意與 TEXT_TO_COLUMNS 分開：單講「split」不該拉進 REGEX，
     # 單講「regex」也不該被當成拆欄。這兩條就是在釘住那條界線。
     ("regex extract digits from item", ["INPUT_DUCKDB", "REGEX"]),

@@ -26,6 +26,7 @@ import {
 	safeNewFieldSuffix,
 	hasCurrentField,
 	applyCurrentField,
+	safeSplitMode,
 	intLit,
 } from "./sql";
 import type { Edge } from "@xyflow/react";
@@ -106,6 +107,8 @@ export interface NodeConfig {
 	/** MULTI_FIELD_FORMULA：OVERWRITE | NEW_FIELD */
 	outputMode?: string;
 	newFieldSuffix?: string;
+	/** TEXT_TO_COLUMNS：SEPARATOR（字面）| REGEX（樣式切分） */
+	splitMode?: string;
 	/** 視窗節點 */
 	partitionBy?: string[];
 	orderBy?: string;
@@ -629,11 +632,20 @@ export function compileNodeSelect(
 			const sep = String(config.separator ?? ",");
 			const names = toNameList(config.outputColumns, []);
 			if (names.length === 0) return `SELECT * FROM ${qi(sourceTable)}`;
-			// string_split 回傳 list，越界的索引是 NULL（不是空字串）
-			const proj = names.map(
-				(n, i) =>
-					`(string_split(${qi(field)}, ${strLit(sep)}))[${i + 1}] AS ${qi(n)}`,
-			);
+
+			// 兩種切法回傳的都是 list，越界的索引都回 NULL（已實測），
+			// 所以下面的取值方式不用分模式。
+			let split: string;
+			if (safeSplitMode(config.splitMode) === "REGEX") {
+				// 空樣式會讓 regexp_split_to_array 對每個字元切一刀（不是報錯），
+				// 產出一堆沒有意義的欄位。與 REGEX 節點一致：沒有樣式就 passthrough。
+				if (!sep) return `SELECT * FROM ${qi(sourceTable)}`;
+				split = `regexp_split_to_array(${qi(field)}, ${strLit(regexPattern(sep, config.caseInsensitive))})`;
+			} else {
+				split = `string_split(${qi(field)}, ${strLit(sep)})`;
+			}
+
+			const proj = names.map((n, i) => `(${split})[${i + 1}] AS ${qi(n)}`);
 			return `SELECT *, ${proj.join(", ")} FROM ${qi(sourceTable)}`;
 		}
 

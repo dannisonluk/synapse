@@ -144,7 +144,9 @@ export const NODE_FIELDS: { readonly [K in NodeType]: readonly FieldSpec[] } = {
 	],
 	TEXT_TO_COLUMNS: [
 		{ name: "field", kind: "field", label: "來源欄位", required: true },
-		{ name: "separator", kind: "text", label: "分隔符", required: false },
+		{ name: "splitMode", kind: "enum", label: "切分方式", required: false, values: ["SEPARATOR", "REGEX"] },
+		{ name: "separator", kind: "text", label: "分隔符 / 樣式", required: false },
+		{ name: "caseInsensitive", kind: "boolean", label: "忽略大小寫（REGEX）", required: false },
 		{ name: "outputColumns", kind: "textList", label: "輸出欄位名", required: true },
 	],
 	UNIQUE: [
@@ -205,7 +207,7 @@ export const NODE_META: { readonly [K in NodeType]: NodeMeta } = {
 	SAMPLE: { label: "Sample", category: "Preparation", description: "取前 N 列，或隨機取樣 N 列（固定 seed，可重現）。", inputs: 1 },
 	SELECT: { label: "Select", category: "Preparation", description: "挑選要保留的欄位（空的 columns = 全選）。", inputs: 1 },
 	SORT: { label: "Sort", category: "Preparation", description: "依指定欄位排序。", inputs: 1 },
-	TEXT_TO_COLUMNS: { label: "Text to Columns", category: "Preparation", description: "用分隔符把一個字串欄位拆成多個欄位。", inputs: 1 },
+	TEXT_TO_COLUMNS: { label: "Text to Columns", category: "Preparation", description: "用分隔符或正規表示式把一個字串欄位拆成多個欄位。", inputs: 1 },
 	UNIQUE: { label: "Unique", category: "Preparation", description: "依指定欄位去重，每個鍵只保留第一列。", inputs: 1 },
 	CROSS_TAB: { label: "Cross Tab", category: "Transform", description: "列轉欄（pivot）：把某欄的值展開成新欄位。", inputs: 1 },
 	SUMMARIZE: { label: "Summarize", category: "Transform", description: "依分組鍵聚合，支援多個分組鍵與多個聚合。", inputs: 1 },

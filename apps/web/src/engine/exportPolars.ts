@@ -14,7 +14,7 @@
 import type { Edge, Node } from "@xyflow/react";
 import { orderUpstreamSources, topologicalSort } from "./scheduler";
 import { resolveSourceTables, falseBranchTable } from "./astCompiler";
-import { safeOp, safeFunc, safeJoinType, safeExpr, safeUnionMode, safeSampleMode, safeImputeMethod, safeRankMethod, safeUnmatched, safeRegexMode, regexPattern, safeMultiFieldOutputMode, safeNewFieldSuffix, hasCurrentField, applyCurrentField, intLit } from "./sql";
+import { safeOp, safeFunc, safeJoinType, safeExpr, safeUnionMode, safeSampleMode, safeImputeMethod, safeRankMethod, safeUnmatched, safeRegexMode, regexPattern, safeMultiFieldOutputMode, safeNewFieldSuffix, hasCurrentField, applyCurrentField, safeSplitMode, intLit } from "./sql";
 
 // ---------------------------------------------------------------------------
 // Python literal / identifier
@@ -642,9 +642,17 @@ function emitNode(
 				`節點 ${id}：list.get 帶了 null_on_oob=True —— Polars 預設越界會拋錯，` +
 					`DuckDB 的 string_split(...)[n] 則回 NULL`,
 			);
+			// 實測（Polars 1.44）：`str.split` 的 `by` 預設是**字面**比對，
+			// 不是 regex。但這個預設值在 Polars 版本之間改過，所以兩種模式都把
+			// literal 明寫出來 —— 依賴一個會變的預設值，等於把語意綁在版本上。
+			const isRegex = safeSplitMode(config?.splitMode) === "REGEX";
+			if (isRegex && !sep) return `${id} = ${src}  # 未設定樣式 → passthrough`;
+			const splitExpr = isRegex
+				? `pl.col(${pyStr(field)}).str.split(${pyStr(regexPattern(sep, config?.caseInsensitive))}, literal=False)`
+				: `pl.col(${pyStr(field)}).str.split(${pyStr(sep)}, literal=True)`;
 			const parts = names.map(
 				(n: string, i: number) =>
-					`pl.col(${pyStr(field)}).str.split(${pyStr(sep)}).list.get(${i}, null_on_oob=True).alias(${pyStr(n)})`,
+					`${splitExpr}.list.get(${i}, null_on_oob=True).alias(${pyStr(n)})`,
 			);
 			return `${id} = ${src}.with_columns([${parts.join(", ")}])`;
 		}

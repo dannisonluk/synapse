@@ -98,6 +98,8 @@ export interface ASTNodeConfig {
 	outputMode?: string;
 	/** MULTI_FIELD_FORMULA：NEW_FIELD 模式的新欄位後綴（空字串會被退回 "_new"） */
 	newFieldSuffix?: string;
+	/** TEXT_TO_COLUMNS：SEPARATOR（字面分隔符）| REGEX（樣式切分） */
+	splitMode?: string;
 	/** 視窗節點：分區鍵、排序鍵、是否遞減 */
 	partitionBy?: string[];
 	orderBy?: string;
