@@ -710,6 +710,96 @@ export async function runDuckDbWasmChecks(root, loadTs, fallbackPipelines = []) 
 		compiler.compileNodeSelect("x", "TEXT_TO_COLUMNS", { field: "raw", outputColumns: [] }, ["t2c_src"]),
 		'SELECT * FROM "t2c_src"');
 
+	// 11e. REGEX：MATCH / PARSE / REPLACE
+	// 這一段刻意把「未命中」與「NULL 輸入」都測到：regexp_extract 未命中時回
+	// **空字串**而不是 NULL，這是與 Polars str.extract 的已知差異（見 exportPolars），
+	// 寫成 assertion 才不會被「順手改成 COALESCE」修掉。
+	conn.query(
+		`CREATE OR REPLACE TABLE re_src AS SELECT * FROM (VALUES
+			('HK-1001', 1), ('TW-2002', 2), ('XX', 3), (NULL, 4)
+		) AS t(code, id);`,
+	);
+
+	// --- MATCH → 布林欄位 ---
+	const reMatch = compiler.compileNodeSelect(
+		"node_re_match", "REGEX",
+		{ field: "code", regexMode: "MATCH", pattern: "^[A-Z]{2}-\\d{4}$", outputColumn: "is_valid" },
+		["re_src"]);
+	conn.query(`CREATE OR REPLACE TABLE node_re_match AS ${reMatch};`);
+	add("REGEX MATCH produces a boolean column",
+		q("SELECT is_valid FROM node_re_match WHERE id = 1;"), [["true"]]);
+	add("REGEX MATCH is false (not NULL) for a non-matching row",
+		q("SELECT is_valid FROM node_re_match WHERE id = 3;"), [["false"]]);
+	add("REGEX MATCH passes NULL input through",
+		q("SELECT is_valid FROM node_re_match WHERE id = 4;"), [["null"]]);
+	add("REGEX MATCH keeps the source columns",
+		schema("node_re_match"), ["code", "id", "is_valid"]);
+
+	// --- PARSE → 每個 capture group 一欄 ---
+	const reParse = compiler.compileNodeSelect(
+		"node_re_parse", "REGEX",
+		{ field: "code", regexMode: "PARSE", pattern: "([A-Z]{2})-(\\d{4})",
+		  outputColumns: ["country", "number"] },
+		["re_src"]);
+	conn.query(`CREATE OR REPLACE TABLE node_re_parse AS ${reParse};`);
+	add("REGEX PARSE extracts each capture group",
+		q("SELECT country, number FROM node_re_parse WHERE id = 1;"), [["HK", "1001"]]);
+	// 已實測的跨引擎差異：DuckDB 回空字串、Polars 的 str.extract 回 null
+	// （q() 會把每個值 String() 化，所以布林是 "false" / "true" 字串）
+	add("REGEX PARSE yields an EMPTY STRING, not NULL, when nothing matches",
+		q("SELECT country IS NULL AS is_null, country = '' AS is_empty FROM node_re_parse WHERE id = 3;"),
+		[["false", "true"]]);
+	add("REGEX PARSE passes NULL input through",
+		q("SELECT country FROM node_re_parse WHERE id = 4;"), [["null"]]);
+
+	// --- REPLACE → 全域取代（'g'），且支援反向參照 ---
+	const reRepl = compiler.compileNodeSelect(
+		"node_re_repl", "REGEX",
+		{ field: "code", regexMode: "REPLACE", pattern: "\\d", replacement: "#",
+		  outputColumn: "masked" },
+		["re_src"]);
+	conn.query(`CREATE OR REPLACE TABLE node_re_repl AS ${reRepl};`);
+	add("REGEX REPLACE replaces every hit, not just the first",
+		q("SELECT masked FROM node_re_repl WHERE id = 1;"), [["HK-####"]]);
+	const reSwap = compiler.compileNodeSelect(
+		"node_re_swap", "REGEX",
+		{ field: "code", regexMode: "REPLACE", pattern: "([A-Z]{2})-(\\d+)",
+		  replacement: "\\2-\\1", outputColumn: "swapped" },
+		["re_src"]);
+	conn.query(`CREATE OR REPLACE TABLE node_re_swap AS ${reSwap};`);
+	add("REGEX REPLACE supports \\1 backreferences",
+		q("SELECT swapped FROM node_re_swap WHERE id = 1;"), [["1001-HK"]]);
+
+	// --- caseInsensitive 必須摺成 inline (?i)，因為 Polars 沒有 case 參數 ---
+	const reCi = compiler.compileNodeSelect(
+		"node_re_ci", "REGEX",
+		{ field: "code", regexMode: "MATCH", pattern: "hk", caseInsensitive: true, outputColumn: "m" },
+		["re_src"]);
+	add("REGEX folds case-insensitivity into an inline (?i)",
+		reCi.includes("'(?i)hk'"), true);
+	conn.query(`CREATE OR REPLACE TABLE node_re_ci AS ${reCi};`);
+	add("REGEX case-insensitive MATCH actually matches",
+		q("SELECT m FROM node_re_ci WHERE id = 1;"), [["true"]]);
+
+	// --- 邊界：空白樣式、非法模式、非字串欄位 ---
+	add("REGEX with no pattern is a passthrough (not an always-false column)",
+		compiler.compileNodeSelect("x", "REGEX", { field: "code", pattern: "" }, ["re_src"]),
+		'SELECT * FROM "re_src"');
+	add("REGEX falls back to MATCH for a mode outside the whitelist",
+		compiler.compileNodeSelect("x", "REGEX",
+			{ field: "code", regexMode: "DROP TABLE", pattern: "a" }, ["re_src"]).includes("regexp_matches"),
+		true);
+	add("REGEX PARSE with no capture-column names is a passthrough",
+		compiler.compileNodeSelect("x", "REGEX",
+			{ field: "code", regexMode: "PARSE", pattern: "a", outputColumns: [] }, ["re_src"]),
+		'SELECT * FROM "re_src"');
+	// 樣式裡的反斜線不可以被當成 escape —— DuckDB 的單引號字串不做 backslash escaping，
+	// 所以 strLit 只 escape 單引號是正確的。這條 assertion 把那個假設釘住。
+	add("REGEX escapes a quote in the pattern without touching backslashes",
+		compiler.compileNodeSelect("x", "REGEX",
+			{ field: "code", pattern: "it's \\d+" }, ["re_src"]).includes("'it''s \\d+'"),
+		true);
+
 	// =====================================================================
 	// 12. 視窗 / 序列組：MULTI_ROW_FORMULA / RUNNING_TOTAL / RANK
 	// =====================================================================

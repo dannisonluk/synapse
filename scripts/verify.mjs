@@ -48,8 +48,14 @@ for (const ev of ["uncaughtException", "unhandledRejection"]) {
 	});
 }
 
+// 每個 assertion 的名字都會被記錄下來，最後檢查有沒有重名。
+// 兩個 assertion 同名會讓失敗輸出無法分辨是哪一個壞了 —— 這在
+// 「SQL 版」與「Polars 版」成對的斷言上特別容易發生，而那正是最需要
+// 一眼看出「哪個引擎算錯」的地方。
+const checkNames = [];
 function check(name, actual, expected) {
 	checks++;
+	checkNames.push(name);
 	const a = JSON.stringify(actual);
 	const e = JSON.stringify(expected);
 	if (a === e) {
@@ -421,8 +427,20 @@ check("toFlowEdges marks particleEdge + animated",
 	check("unknown type falls back to FILTER rather than vanishing",
 		[unknown.nodes.length, unknown.nodes[0].nodeType], [1, "FILTER"]);
 
-	// 3b-4. catalogue 與編譯器的 type 清單必須一致（這裡是最便宜的一條守門）。
-	check("catalogue covers all 22 types", catalogTypes.length, 22);
+	// 3b-4. catalogue 與 types/workbench.ts 的 union 必須一致。
+	//
+	// 這裡刻意**不寫死數字**（以前是 `22`）：那個數字每加一個工具就要改一次，
+	// 而且它證明不了「catalogue 覆蓋了 union 的每一個成員」—— 一個手滑打錯的
+	// 數字只會讓測試紅燈，卻說不出到底少了誰。改成從原始碼解析 union 成員再比對，
+	// 加工具時這條 assertion 自動跟上。
+	const typesSrc = readFileSync(join(ROOT, "apps", "web", "src", "types", "workbench.ts"), "utf8");
+	const unionBlock = /export type AlteryxNodeType\s*=([\s\S]*?);/.exec(typesSrc);
+	const unionTypes = unionBlock
+		? [...unionBlock[1].matchAll(/"([A-Z_]+)"/g)].map((m) => m[1]).sort()
+		: [];
+	check("parsed the AlteryxNodeType union from source (so the check is not vacuous)",
+		unionTypes.length > 0, true);
+	check("the catalogue covers exactly the AlteryxNodeType union", catalogTypes, unionTypes);
 }
 
 // ===========================================================================
@@ -966,7 +984,7 @@ section("8. exportPolars.ts — Python / Polars 腳本匯出");
 	has("DATA_CLEANSING trims",
 		one("DATA_CLEANSING", { columns: ["name"], trim: true, collapse: false }),
 		'pl.col("name").str.strip_chars()');
-	has("DATA_CLEANSING collapse squeezes inner whitespace",
+	has("the Polars exporter squeezes inner whitespace for DATA_CLEANSING",
 		one("DATA_CLEANSING", { columns: ["name"], collapse: true }),
 		'.str.replace_all(r"\\s+", " ").str.strip_chars()');
 	has("DATA_CLEANSING turns the empty string into null",
@@ -994,6 +1012,73 @@ section("8. exportPolars.ts — Python / Polars 腳本匯出");
 	has("RUNNING_TOTAL fills nulls before cum_sum to match DuckDB",
 		one("RUNNING_TOTAL", { target: "amount", outputColumn: "rt", orderBy: "seq" }),
 		'pl.col("amount").fill_null(0).cum_sum().over(order_by="seq")');
+
+	// --- REGEX：三種模式必須真的走到三個不同的 Polars API ---
+	// 這裡守的是「模式選了 PARSE 卻還是呼叫 contains」那類靜默錯誤 ——
+	// 畫布上完全看不出來，只有匯出的腳本算出來的東西不一樣。
+	has("REGEX MATCH maps to .str.contains",
+		one("REGEX", { field: "code", regexMode: "MATCH", pattern: "^HK", outputColumn: "is_hk" }),
+		'pl.col("code").str.contains("^HK").alias("is_hk")');
+	has("REGEX defaults to MATCH when no mode is given",
+		one("REGEX", { field: "code", pattern: "^HK" }), ".str.contains(");
+	has("REGEX PARSE maps to .str.extract with a 1-based group_index",
+		one("REGEX", { field: "code", regexMode: "PARSE", pattern: "(\\w+)-(\\d+)", outputColumns: ["prefix", "num"] }),
+		'pl.col("code").str.extract("(\\\\w+)-(\\\\d+)", group_index=1).alias("prefix")');
+	// Polars 與 DuckDB 的擷取群組都是 1-based，但誤用 0 在 Polars 是「整段命中」
+	// 而不是錯誤 —— 只會安靜地抓錯東西。所以第二個群組也要釘住。
+	has("REGEX PARSE numbers the second group as 2",
+		one("REGEX", { field: "code", regexMode: "PARSE", pattern: "(\\w+)-(\\d+)", outputColumns: ["prefix", "num"] }),
+		'group_index=2).alias("num")');
+	has("REGEX PARSE does not fall through to contains",
+		one("REGEX", { field: "code", regexMode: "PARSE", pattern: "(\\w+)", outputColumns: ["prefix"] }),
+		".str.contains", false);
+	has("REGEX REPLACE maps to .str.replace_all (global, not first-only)",
+		one("REGEX", { field: "code", regexMode: "REPLACE", pattern: "-", replacement: "_", outputColumn: "clean" }),
+		'pl.col("code").str.replace_all("-", "_").alias("clean")');
+	has("REGEX REPLACE does not fall through to contains",
+		one("REGEX", { field: "code", regexMode: "REPLACE", pattern: "-", replacement: "_" }),
+		".str.contains", false);
+
+	// 跨引擎一致性：忽略大小寫一律折成 inline (?i)，因為 Polars 的
+	// str.contains / str.extract / str.replace_all 三個方法都沒有 case 參數。
+	// 兩個 exporter 必須折得一模一樣，否則同一份流程兩邊算出來的不一樣。
+	// （名字刻意與 verify_duckdb_wasm.mjs 的 SQL 那條區分開，否則失敗時
+	//   光看名字分不出是哪個引擎壞了。）
+	has("the Polars exporter folds case-insensitivity into an inline (?i)",
+		one("REGEX", { field: "code", pattern: "hk", caseInsensitive: true }),
+		'.str.contains("(?i)hk")');
+	has("REGEX does not fold (?i) when caseInsensitive is false",
+		one("REGEX", { field: "code", pattern: "hk", caseInsensitive: false }),
+		'.str.contains("(?i)hk")', false);
+	// 使用者自己寫了 (?i) 不可以被折成 (?i)(?i) —— 那在 PCRE 合法，
+	// 但會讓「到底有幾個旗標」變得不可預期。
+	has("REGEX does not double an explicit (?i)",
+		one("REGEX", { field: "code", pattern: "(?i)hk", caseInsensitive: true }),
+		'.str.contains("(?i)hk")');
+	has("REGEX never emits a doubled flag",
+		one("REGEX", { field: "code", pattern: "(?i)hk", caseInsensitive: true }),
+		"(?i)(?i)", false);
+	// 反斜線在單引號字串裡是字面值，所以 pyStr 只該把 \ 跳脫一層 ——
+	// 這條釘住「多跳一層變成 \\\\d」那種錯誤。真正的往返證明在下面的
+	// 實跑區塊（樣式要真的在 Polars 裡擷取到數字才算數）。
+	has("REGEX escapes a backslash exactly once",
+		one("REGEX", { field: "code", pattern: "\\d+" }), '"\\\\d+"');
+	has("REGEX does not over-escape a backslash",
+		one("REGEX", { field: "code", pattern: "\\d+" }), '"\\\\\\\\d+"', false);
+
+	// 沒有樣式就 passthrough —— 寧可什麼都不做，也不要產生一個永遠 false 的欄位。
+	has("REGEX with no pattern is a passthrough",
+		one("REGEX", { field: "code", pattern: "" }), "passthrough");
+	has("REGEX with no pattern does not create an always-false column",
+		one("REGEX", { field: "code", pattern: "" }), ".str.contains", false);
+	has("the Polars exporter falls back to MATCH for a mode outside the whitelist",
+		one("REGEX", { field: "code", regexMode: "DROP TABLE", pattern: "x" }), ".str.contains(");
+	has("the Polars exporter treats PARSE with no capture-column names as a passthrough",
+		one("REGEX", { field: "code", regexMode: "PARSE", pattern: "(x)" }), "passthrough");
+	// 未命中的差異必須寫進使用者看得到的腳本備註裡，而不是只留在程式碼註解中。
+	has("the PARSE empty-string-vs-null divergence is written into the script",
+		one("REGEX", { field: "code", regexMode: "PARSE", pattern: "(x)", outputColumns: ["g"] }),
+		"未命中時 regexp_extract 回空字串");
 	has("RANK maps RANK to method='min'",
 		one("RANK", { target: "amount", outputColumn: "r", method: "RANK", descending: true }),
 		'.rank(method="min", descending=True)');
@@ -1115,6 +1200,92 @@ section("8. exportPolars.ts — Python / Polars 腳本匯出");
 			// NULL amount 必須被 FILTER 排除，不可讓 TW 變成 null 或 2200 以外
 			check("the NULL row is excluded by the filter, not counted as 0",
 				runOut.includes("TW") && !runOut.includes("nan"), true);
+
+			// --- REGEX：把匯出的 REGEX 節點真的跑一次 ---
+			// 上面那批是字串比對，只能證明「看起來像」。這裡要證明的是
+			// 「跑起來算出來的東西是對的」—— 尤其是反斜線樣式有沒有活著
+			// 穿過 pyStr 的跳脫、以及 (?i) 有沒有真的生效。
+			//
+			// 資料刻意放一列沒有 '-' 的值（plain），這樣 PARSE 未命中、
+			// REPLACE 不變、MATCH 為 false 三種情況可以同時觀察到。
+			// 另外放一列空值，用來確認 NULL 有被傳遞而不是被當成空字串。
+			const reDir = mkdtempSync(join(tmpdir(), "synapse-regex-run-"));
+			writeFileSync(join(reDir, "codes.csv"), "code,note\nhk-001,a\nHK-002,b\ntw-003,c\nplain,d\n,e\n", "utf8");
+			const reChain = polars.exportToPolars([
+				mk("node_in", { label: "Input", type: "INPUT_DUCKDB", config: { fileName: "codes.csv" } }),
+				mk("node_m", { label: "Match", type: "REGEX", config: {
+					field: "code", regexMode: "MATCH", pattern: "hk", caseInsensitive: true, outputColumn: "is_hk" } }),
+				mk("node_p", { label: "Parse", type: "REGEX", config: {
+					field: "code", regexMode: "PARSE", pattern: "([a-z]+)-(\\d+)", caseInsensitive: true,
+					outputColumns: ["prefix", "num"] } }),
+				mk("node_r", { label: "Replace", type: "REGEX", config: {
+					field: "code", regexMode: "REPLACE", pattern: "-", replacement: "_", outputColumn: "clean" } }),
+			], [
+				{ id: "re1", source: "node_in", target: "node_m", targetHandle: "left" },
+				{ id: "re2", source: "node_m", target: "node_p", targetHandle: "left" },
+				{ id: "re3", source: "node_p", target: "node_r", targetHandle: "left" },
+			]);
+			check("the REGEX chain needs no manual review", reChain.needsReview, []);
+
+			const reScriptPath = join(reDir, "regex.py");
+			writeFileSync(reScriptPath, reChain.script, "utf8");
+			let reOut = null;
+			try {
+				reOut = execFileSync(polarsPy, [reScriptPath], {
+					cwd: reDir,
+					encoding: "utf8",
+					stdio: ["ignore", "pipe", "pipe"],
+					env: { ...process.env, POLARS_SKIP_CPU_CHECK: "1" },
+				});
+			} catch (err) {
+				reOut = String(err.stdout || "") + String(err.stderr || err.message);
+			}
+			// REPLACE 必須是全域且保留原大小寫：hk-001 → hk_001、HK-002 → HK_002
+			check("the generated REGEX script actually runs", reOut.includes("hk_001"), true);
+			check("REGEX REPLACE keeps the original case of the value", reOut.includes("HK_002"), true);
+			// (?i) 真的生效：HK-002 也要命中樣式 "hk"
+			check("the (?i) flag actually matches an upper-case value", reOut.includes("true"), true);
+			// MATCH 未命中要給 false，不是 null
+			check("REGEX MATCH yields false (not null) for a non-matching row", reOut.includes("false"), true);
+			// 空值那列必須維持 null
+			check("REGEX passes a NULL input through as null", reOut.includes("null"), true);
+			// PARSE 節點真的有輸出欄位（不是被靜默跳過）
+			check("the PARSE node contributes its capture columns",
+				reOut.includes("prefix") && reOut.includes("num"), true);
+
+			// 上面那批是「整條鏈跑得起來」的煙霧測試。數值本身要靠探針才量得準 ——
+			// 因為 "001" 這種字串在來源欄位裡本來就有，用 includes() 斷言會變成
+			// 一條永遠會過的假測試（這是這份 harness 最容易犯的錯）。
+			// 探針一次釘住三件事：\d 有活著穿過 pyStr 的跳脫、(?i) 有生效、
+			// 以及未命中時回 null 而不是空字串。
+			const probePath = join(reDir, "probe.py");
+			writeFileSync(probePath, [
+				"import polars as pl",
+				'df = pl.DataFrame({"code": ["hk-001", "HK-002", "plain", None]})',
+				'pat = "(?i)([a-z]+)-(\\\\d+)"',
+				'g = df.with_columns(pl.col("code").str.extract(pat, group_index=1).alias("prefix"),',
+				'                    pl.col("code").str.extract(pat, group_index=2).alias("num"))',
+				'print("PARSE_PREFIX=" + repr(g["prefix"].to_list()))',
+				'print("PARSE_NUM=" + repr(g["num"].to_list()))',
+				"",
+			].join("\n"), "utf8");
+			let probeOut = null;
+			try {
+				probeOut = execFileSync(polarsPy, [probePath], {
+					encoding: "utf8",
+					stdio: ["ignore", "pipe", "pipe"],
+					env: { ...process.env, POLARS_SKIP_CPU_CHECK: "1" },
+				});
+			} catch (err) {
+				probeOut = String(err.stdout || "") + String(err.stderr || err.message);
+			}
+			// (?i) 讓 HK-002 也被 [a-z]+ 抓到；'plain' 未命中 → None；NULL → None。
+			// 對照 DuckDB 的 ['hk', 'HK', '', ''] —— 差異就是最後那個 '' 與 None，
+			// 兩邊都刻意保留，因為「沒有命中」和「命中到空字串」本來就是不同的事。
+			check("Polars str.extract returns null (not '') when nothing matches",
+				probeOut.includes("PARSE_PREFIX=['hk', 'HK', None, None]"), true);
+			check("a backslash pattern survives pyStr escaping and captures digits",
+				probeOut.includes("PARSE_NUM=['001', '002', None, None]"), true);
 		}
 	}
 }
@@ -1287,7 +1458,7 @@ section("9. persistence.ts — 自動存檔（可注入 storage，因此能在 N
 	check("every node type in the keyword fallback exists in the catalogue",
 		unknownInFallback, []);
 	// fallback 至少要知道這幾個最常用的新工具，否則 AI 一掛就退回舊世界
-	for (const t of ["UNIQUE", "DATA_CLEANSING", "RANK", "RUNNING_TOTAL", "CROSS_TAB", "TRANSPOSE"]) {
+	for (const t of ["UNIQUE", "DATA_CLEANSING", "RANK", "RUNNING_TOTAL", "CROSS_TAB", "TRANSPOSE", "REGEX"]) {
 		check(`the keyword fallback understands ${t}`, fallbackTypes.includes(t), true);
 	}
 }
@@ -1436,6 +1607,17 @@ section("11. repo 一致性 — 衍生產物、設定檔、死程式碼");
 	check("an ESLint config exists", existsSync(join(ROOT, ".eslintrc.cjs")), true);
 	check("eslint is declared as a devDependency",
 		typeof rootPkg.devDependencies?.eslint, "string");
+}
+
+// ===========================================================================
+// 12. harness 自身的一致性
+// ===========================================================================
+section("12. harness 自身的一致性");
+{
+	// 重名不會讓測試變紅，只會讓**失敗的時候**變難查。所以這裡把它變成紅燈。
+	const dupes = [...new Set(checkNames.filter((n, i) => checkNames.indexOf(n) !== i))].sort();
+	check("no two assertions share a name", dupes, []);
+	check("the name list is not empty (so the check is not vacuous)", checkNames.length > 0, true);
 }
 
 // ===========================================================================
