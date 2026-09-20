@@ -800,6 +800,105 @@ export async function runDuckDbWasmChecks(root, loadTs, fallbackPipelines = []) 
 			{ field: "code", pattern: "it's \\d+" }, ["re_src"]).includes("'it''s \\d+'"),
 		true);
 
+	// 11f. MULTI_FIELD_FORMULA：一個運算式套用到多個欄位
+	// 這裡刻意讓 name / code 兩欄的值不同 —— 這樣才能分辨「逐欄代入 _CurrentField_」
+	// 與「只算一次然後複製到每一欄」（後者會讓兩欄拿到同一個值）。
+	conn.query(
+		`CREATE OR REPLACE TABLE mff_src AS SELECT * FROM (VALUES
+			('  ab  ', 'x', 10), ('cd', 'y', 20), (NULL, NULL, 30)
+		) AS t(name, code, amount);`,
+	);
+
+	// --- OVERWRITE：就地改寫 ---
+	const mffOver = compiler.compileNodeSelect(
+		"node_mff_over", "MULTI_FIELD_FORMULA",
+		{ columns: ["name", "code"], expression: "TRIM(_CurrentField_)", outputMode: "OVERWRITE" },
+		["mff_src"]);
+	add("MULTI_FIELD_FORMULA OVERWRITE emits SELECT * REPLACE",
+		mffOver.startsWith("SELECT * REPLACE ("), true);
+	conn.query(`CREATE OR REPLACE TABLE node_mff_over AS ${mffOver};`);
+	// 欄位順序必須不變 —— 這正是選用 REPLACE 而不是重建投影的原因
+	add("MULTI_FIELD_FORMULA OVERWRITE preserves column order",
+		schema("node_mff_over"), ["name", "code", "amount"]);
+	add("MULTI_FIELD_FORMULA trims every selected field",
+		q("SELECT name, code FROM node_mff_over WHERE amount = 10;"), [["ab", "x"]]);
+	add("MULTI_FIELD_FORMULA passes NULL through",
+		q("SELECT name FROM node_mff_over WHERE amount = 30;"), [["null"]]);
+
+	// 逐欄代入的證明：同一個運算式 UPPER(_CurrentField_)，兩欄的結果必須不同。
+	// 若實作只算一次再複製，這裡會拿到 ['X','X'] 而不是 ['AB','X']。
+	const mffPerCol = compiler.compileNodeSelect(
+		"node_mff_percol", "MULTI_FIELD_FORMULA",
+		{ columns: ["name", "code"], expression: "UPPER(_CurrentField_)" }, ["mff_src"]);
+	conn.query(`CREATE OR REPLACE TABLE node_mff_percol AS ${mffPerCol};`);
+	add("MULTI_FIELD_FORMULA substitutes _CurrentField_ per field, not once",
+		q("SELECT name, code FROM node_mff_percol WHERE amount = 10;"), [["  AB  ", "X"]]);
+
+	// --- NEW_FIELD：保留原欄位 ---
+	const mffNew = compiler.compileNodeSelect(
+		"node_mff_new", "MULTI_FIELD_FORMULA",
+		{ columns: ["name"], expression: "UPPER(_CurrentField_)", outputMode: "NEW_FIELD" },
+		["mff_src"]);
+	conn.query(`CREATE OR REPLACE TABLE node_mff_new AS ${mffNew};`);
+	add("MULTI_FIELD_FORMULA NEW_FIELD keeps the original column",
+		schema("node_mff_new"), ["name", "code", "amount", "name_new"]);
+	add("MULTI_FIELD_FORMULA NEW_FIELD appends the transformed value",
+		q("SELECT name, name_new FROM node_mff_new WHERE amount = 10;"), [["  ab  ", "  AB  "]]);
+	const mffUp = compiler.compileNodeSelect(
+		"node_mff_up", "MULTI_FIELD_FORMULA",
+		{ columns: ["name"], expression: "UPPER(_CurrentField_)", outputMode: "NEW_FIELD", newFieldSuffix: "_up" },
+		["mff_src"]);
+	conn.query(`CREATE OR REPLACE TABLE node_mff_up AS ${mffUp};`);
+	add("MULTI_FIELD_FORMULA honours a custom suffix",
+		schema("node_mff_up"), ["name", "code", "amount", "name_up"]);
+	// 空後綴會讓新欄位與原欄位同名。實測：DuckDB 安靜地產生兩個同名的欄位，
+	// 而 Polars 的同名 alias 是安靜地就地取代 —— 兩邊都不報錯卻做不同的事，
+	// 所以空後綴一律退回 "_new"。
+	add("MULTI_FIELD_FORMULA falls back to _new for an empty suffix",
+		compiler.compileNodeSelect("x", "MULTI_FIELD_FORMULA",
+			{ columns: ["name"], expression: "UPPER(_CurrentField_)", outputMode: "NEW_FIELD", newFieldSuffix: "" },
+			["mff_src"]).includes('AS "name_new"'),
+		true);
+
+	// --- 防呆 ---
+	// 重複的欄位：兩個引擎都會直接報錯（DuckDB: Duplicate entry in REPLACE list），
+	// 所以編譯器先收掉。這條會同時證明它真的收掉了，而不是產生會炸的 SQL。
+	add("MULTI_FIELD_FORMULA dedupes a repeated field",
+		compiler.compileNodeSelect("x", "MULTI_FIELD_FORMULA",
+			{ columns: ["name", "name"], expression: "TRIM(_CurrentField_)" }, ["mff_src"]),
+		'SELECT * REPLACE ((TRIM("name")) AS "name") FROM "mff_src"');
+	// 沒有 _CurrentField_ 就等於「把每一欄都寫成同一個常數」，在 OVERWRITE 模式
+	// 是不可逆的資料破壞。所以退回 passthrough，而不是照做。
+	add("MULTI_FIELD_FORMULA without _CurrentField_ is a passthrough",
+		compiler.compileNodeSelect("x", "MULTI_FIELD_FORMULA",
+			{ columns: ["name", "code"], expression: "1" }, ["mff_src"]),
+		'SELECT * FROM "mff_src"');
+	add("MULTI_FIELD_FORMULA with no columns is a passthrough",
+		compiler.compileNodeSelect("x", "MULTI_FIELD_FORMULA",
+			{ columns: [], expression: "TRIM(_CurrentField_)" }, ["mff_src"]),
+		'SELECT * FROM "mff_src"');
+	// LLM 很常寫成小寫的 _currentfield_；兩種寫法只可能指同一個東西。
+	add("MULTI_FIELD_FORMULA accepts a lower-case _currentfield_",
+		compiler.compileNodeSelect("x", "MULTI_FIELD_FORMULA",
+			{ columns: ["name"], expression: "trim(_currentfield_)" }, ["mff_src"]),
+		'SELECT * REPLACE ((trim("name")) AS "name") FROM "mff_src"');
+	add("MULTI_FIELD_FORMULA falls back to OVERWRITE for a mode outside the whitelist",
+		compiler.compileNodeSelect("x", "MULTI_FIELD_FORMULA",
+			{ columns: ["name"], expression: "TRIM(_CurrentField_)", outputMode: "DROP TABLE" },
+			["mff_src"]).startsWith("SELECT * REPLACE ("),
+		true);
+	// 數值欄位也可以就地改寫。刻意用 * 2 而不是 * 1.1：DECIMAL 在這個 harness 的
+	// `q()` 裡是以未套用 scale 的原值回傳的（Arrow 的 DecimalBigNum），
+	// 那是 harness 的限制，不該混進這條斷言裡。整數運算就沒有這個問題。
+	const mffNum = compiler.compileNodeSelect(
+		"node_mff_num", "MULTI_FIELD_FORMULA",
+		{ columns: ["amount"], expression: "_CurrentField_ * 2" }, ["mff_src"]);
+	conn.query(`CREATE OR REPLACE TABLE node_mff_num AS ${mffNum};`);
+	add("MULTI_FIELD_FORMULA rewrites a numeric column in place",
+		q("SELECT amount FROM node_mff_num ORDER BY amount;"), [["20"], ["40"], ["60"]]);
+	add("MULTI_FIELD_FORMULA leaves the untouched columns alone",
+		schema("node_mff_num"), ["name", "code", "amount"]);
+
 	// =====================================================================
 	// 12. 視窗 / 序列組：MULTI_ROW_FORMULA / RUNNING_TOTAL / RANK
 	// =====================================================================
@@ -1105,6 +1204,17 @@ export async function runDuckDbWasmChecks(root, loadTs, fallbackPipelines = []) 
 				const values = f.values || [];
 				// 取最後一個（與 default 不同的合法值）
 				probeConfig[f.name] = values[values.length - 1] ?? "zz_probe";
+				continue;
+			}
+			// text 欄位優先用目錄宣告的預設值，沒有的話才用合成值。
+			//
+			// 為什麼：有些 text 欄位是「模板」而不是普通字串。MULTI_FIELD_FORMULA
+			// 的 expression 需要內含 `_CurrentField_`，餵 `zz_probe_col` 會讓它
+			// 走「沒有佔位符 → passthrough」那條路，於是產出與空 config 相同，
+			// 這條守門就誤判成「編譯器沒讀這個欄位」。用目錄自己的預設值當探針，
+			// 等於讓每個節點用它自己認可的合法輸入被測試。
+			if (f.kind === "text" && typeof f.default === "string" && f.default !== "") {
+				probeConfig[f.name] = f.default;
 				continue;
 			}
 			probeConfig[f.name] =

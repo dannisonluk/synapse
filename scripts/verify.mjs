@@ -1079,6 +1079,65 @@ section("8. exportPolars.ts — Python / Polars 腳本匯出");
 	has("the PARSE empty-string-vs-null divergence is written into the script",
 		one("REGEX", { field: "code", regexMode: "PARSE", pattern: "(x)", outputColumns: ["g"] }),
 		"未命中時 regexp_extract 回空字串");
+
+	// --- MULTI_FIELD_FORMULA：一個運算式套用到多個欄位 ---
+	// OVERWRITE 用同名 alias 就地取代（Polars 的 with_columns 同名即取代，
+	// 且保留原位置），對應 SQL 的 `SELECT * REPLACE`。
+	has("MULTI_FIELD_FORMULA OVERWRITE aliases back to the same name",
+		one("MULTI_FIELD_FORMULA", { columns: ["name"], expression: "TRIM(_CurrentField_)" }),
+		'((pl.col("name")).str.strip_chars()).alias("name")');
+	has("the Polars exporter applies the expression to every selected column",
+		one("MULTI_FIELD_FORMULA", { columns: ["name", "code"], expression: "TRIM(_CurrentField_)" }),
+		'((pl.col("name")).str.strip_chars()).alias("name"), ((pl.col("code")).str.strip_chars()).alias("code")');
+	has("MULTI_FIELD_FORMULA NEW_FIELD appends a suffixed column",
+		one("MULTI_FIELD_FORMULA", { columns: ["name"], expression: "UPPER(_CurrentField_)", outputMode: "NEW_FIELD" }),
+		'.alias("name_new")');
+	has("the Polars exporter honours a custom new-field suffix",
+		one("MULTI_FIELD_FORMULA", { columns: ["name"], expression: "UPPER(_CurrentField_)", outputMode: "NEW_FIELD", newFieldSuffix: "_up" }),
+		'.alias("name_up")');
+	has("the Polars exporter falls back to _new for an empty suffix",
+		one("MULTI_FIELD_FORMULA", { columns: ["name"], expression: "UPPER(_CurrentField_)", outputMode: "NEW_FIELD", newFieldSuffix: "" }),
+		'.alias("name_new")');
+	has("MULTI_FIELD_FORMULA dedupes a repeated column",
+		one("MULTI_FIELD_FORMULA", { columns: ["name", "name"], expression: "TRIM(_CurrentField_)" }),
+		'pl.col("name")', true);
+
+	// ⚠ 這條是實測踩出來的：`.alias` 的綁定優先於二元運算子，所以
+	//   `pl.col("x") * 2.alias("x")` 會變成 `int.alias` —— Python 在**執行時**
+	//   才炸，而且產生的字串看起來完全正常。整個運算式必須加括號。
+	//   （這是「字串比對不夠、一定要真的跑一次」的最好例子。）
+	has("MULTI_FIELD_FORMULA parenthesises the expression before .alias",
+		one("MULTI_FIELD_FORMULA", { columns: ["amount"], expression: "_CurrentField_ * 2" }),
+		'(pl.col("amount") * 2).alias("amount")');
+	has("MULTI_FIELD_FORMULA never leaves a bare literal before .alias",
+		one("MULTI_FIELD_FORMULA", { columns: ["amount"], expression: "_CurrentField_ * 2" }),
+		"2.alias(", false);
+
+	// 欄位名可能有空白。先翻成 Polars 再把佔位符換掉（而不是先把欄位名代入
+	// 運算式），就是為了讓這種欄位名也能正確產生 `pl.col("my field")`。
+	has("MULTI_FIELD_FORMULA handles a field name containing a space",
+		one("MULTI_FIELD_FORMULA", { columns: ["my field"], expression: "TRIM(_CurrentField_)" }),
+		'(pl.col("my field")).str.strip_chars()');
+
+	// 與 SQL 端一致：沒有 _CurrentField_ 就 passthrough，而不是把每一欄
+	// 都寫成同一個常數（OVERWRITE 模式下那是不可逆的資料破壞）。
+	has("the Polars exporter treats a missing _CurrentField_ as a passthrough",
+		one("MULTI_FIELD_FORMULA", { columns: ["name"], expression: "1" }), "passthrough");
+	has("...and says so in the script's notes",
+		one("MULTI_FIELD_FORMULA", { columns: ["name"], expression: "1" }),
+		"運算式沒有用到 _CurrentField_");
+	has("the Polars exporter treats MULTI_FIELD_FORMULA with no columns as a passthrough",
+		one("MULTI_FIELD_FORMULA", { columns: [], expression: "TRIM(_CurrentField_)" }), "passthrough");
+	has("the Polars exporter accepts a lower-case _currentfield_",
+		one("MULTI_FIELD_FORMULA", { columns: ["name"], expression: "trim(_currentfield_)" }),
+		'pl.col("name")');
+	has("the Polars exporter falls back to OVERWRITE for a mode outside the whitelist",
+		one("MULTI_FIELD_FORMULA", { columns: ["name"], expression: "TRIM(_CurrentField_)", outputMode: "DROP TABLE" }),
+		'.alias("name")');
+	// 無法翻譯（CASE 之類）要標記 needsReview，而不是安靜地產生錯的腳本。
+	const mffBad = oneRes("MULTI_FIELD_FORMULA", { columns: ["name"], expression: "CASE WHEN _CurrentField_ > 1 THEN 1 ELSE 0 END" });
+	check("an untranslatable MULTI_FIELD_FORMULA is reported", mffBad.needsReview, ["node_x"]);
+	has("an untranslatable MULTI_FIELD_FORMULA leaves a TODO", mffBad.script, "# TODO:");
 	has("RANK maps RANK to method='min'",
 		one("RANK", { target: "amount", outputColumn: "r", method: "RANK", descending: true }),
 		'.rank(method="min", descending=True)');
@@ -1286,6 +1345,67 @@ section("8. exportPolars.ts — Python / Polars 腳本匯出");
 				probeOut.includes("PARSE_PREFIX=['hk', 'HK', None, None]"), true);
 			check("a backslash pattern survives pyStr escaping and captures digits",
 				probeOut.includes("PARSE_NUM=['001', '002', None, None]"), true);
+
+			// --- MULTI_FIELD_FORMULA：把匯出的節點真的跑一次 ---
+			// 這裡不是另寫一份等價的 Polars 程式，而是把斷言**接在匯出的腳本後面**
+			// 一起執行 —— 這樣測到的就是使用者實際拿到的那份程式碼。
+			//
+			// 為什麼非跑不可：`.alias` 的綁定優先於二元運算子，`pl.col("x") * 2.alias("x")`
+			// 產生的字串看起來完全正常，但 Python 在執行時才會拋 AttributeError。
+			// 這條鏈故意含一個數值運算式，就是為了讓那個 bug 一定被執行到。
+			const mffDir = mkdtempSync(join(tmpdir(), "synapse-mff-run-"));
+			writeFileSync(join(mffDir, "mff.csv"), "name,code,amount\nhk,ab,10\ntw,cd,20\n", "utf8");
+			const mffChain = polars.exportToPolars([
+				mk("node_in", { label: "Input", type: "INPUT_DUCKDB", config: { fileName: "mff.csv" } }),
+				mk("node_t", { label: "Upper", type: "MULTI_FIELD_FORMULA", config: {
+					columns: ["name", "code"], expression: "UPPER(_CurrentField_)", outputMode: "OVERWRITE" } }),
+				mk("node_u", { label: "Lower", type: "MULTI_FIELD_FORMULA", config: {
+					columns: ["name"], expression: "LOWER(_CurrentField_)",
+					outputMode: "NEW_FIELD", newFieldSuffix: "_low" } }),
+				mk("node_d", { label: "Double", type: "MULTI_FIELD_FORMULA", config: {
+					columns: ["amount"], expression: "_CurrentField_ * 2", outputMode: "OVERWRITE" } }),
+			], [
+				{ id: "mf1", source: "node_in", target: "node_t", targetHandle: "left" },
+				{ id: "mf2", source: "node_t", target: "node_u", targetHandle: "left" },
+				{ id: "mf3", source: "node_u", target: "node_d", targetHandle: "left" },
+			]);
+			check("the MULTI_FIELD_FORMULA chain needs no manual review", mffChain.needsReview, []);
+
+			// 終點節點的變數名就是它的 id，所以可以精確地把值印出來比對 ——
+			// 不必靠 DataFrame 的排版字串，那種斷言很脆。
+			// 前面那個 "\n" 是必要的：匯出的腳本結尾沒有換行，
+			// 直接接上去會變成 `print(node_d)print(...)` 這種語法錯誤。
+			const mffScript = mffChain.script + "\n" + [
+				'print("MFF_NAME=" + repr(node_d["name"].to_list()))',
+				'print("MFF_CODE=" + repr(node_d["code"].to_list()))',
+				'print("MFF_LOW=" + repr(node_d["name_low"].to_list()))',
+				'print("MFF_AMOUNT=" + repr(node_d["amount"].to_list()))',
+				"",
+			].join("\n");
+			const mffScriptPath = join(mffDir, "mff.py");
+			writeFileSync(mffScriptPath, mffScript, "utf8");
+			let mffOut = null;
+			try {
+				mffOut = execFileSync(polarsPy, [mffScriptPath], {
+					cwd: mffDir,
+					encoding: "utf8",
+					stdio: ["ignore", "pipe", "pipe"],
+					env: { ...process.env, POLARS_SKIP_CPU_CHECK: "1" },
+				});
+			} catch (err) {
+				mffOut = String(err.stdout || "") + String(err.stderr || err.message);
+			}
+			// OVERWRITE 就地改寫：name 與 code 都被 UPPER 覆蓋，欄位順序不變
+			check("the generated MULTI_FIELD_FORMULA script actually runs",
+				mffOut.includes("MFF_NAME=['HK', 'TW']"), true);
+			check("MULTI_FIELD_FORMULA applies the expression to every selected column",
+				mffOut.includes("MFF_CODE=['AB', 'CD']"), true);
+			// NEW_FIELD 保留原欄位並多一欄
+			check("MULTI_FIELD_FORMULA NEW_FIELD keeps the original and adds the new column",
+				mffOut.includes("MFF_LOW=['hk', 'tw']"), true);
+			// 數值運算式：這一條就是「.alias 綁定優先」那個 bug 的守門
+			check("MULTI_FIELD_FORMULA parenthesises before .alias (numeric expression runs)",
+				mffOut.includes("MFF_AMOUNT=[20, 40]"), true);
 		}
 	}
 }
@@ -1458,7 +1578,7 @@ section("9. persistence.ts — 自動存檔（可注入 storage，因此能在 N
 	check("every node type in the keyword fallback exists in the catalogue",
 		unknownInFallback, []);
 	// fallback 至少要知道這幾個最常用的新工具，否則 AI 一掛就退回舊世界
-	for (const t of ["UNIQUE", "DATA_CLEANSING", "RANK", "RUNNING_TOTAL", "CROSS_TAB", "TRANSPOSE", "REGEX"]) {
+	for (const t of ["UNIQUE", "DATA_CLEANSING", "RANK", "RUNNING_TOTAL", "CROSS_TAB", "TRANSPOSE", "REGEX", "MULTI_FIELD_FORMULA"]) {
 		check(`the keyword fallback understands ${t}`, fallbackTypes.includes(t), true);
 	}
 }
