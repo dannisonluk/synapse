@@ -751,14 +751,18 @@ if (!duckPy) {
 		null);
 }
 
+// LLM 離線時的決定性 fallback patch。
+// 第 7 節拿它做端到端執行，第 11 節拿它驗證 @synapse/schema 的 AstPatchSchema
+// 真的接受真實 payload（schema 太嚴會擋掉正常輸出，那比沒有 schema 更糟）。
+// 放在 module scope 是刻意的 —— 兩節必須看到同一份資料。
+let fallbackPipelines = [];
+
 // ===========================================================================
 // 7. 真實 duckdb-wasm 引擎（專案自帶依賴，不需要外部環境）
 // ===========================================================================
 section("7. 真實 duckdb-wasm 引擎 — SQL 語意");
 {
-	// LLM 離線時的決定性 fallback patch，交給 wasm harness 端到端執行。
 	// 需要 venv 的 python；沒有就跳過這一節（其餘 wasm 斷言照跑）。
-	let fallbackPipelines = [];
 	if (py) {
 		try {
 			const raw = execFileSync(py, [join(ROOT, "scripts", "fallback_pipelines.py")], {
@@ -1286,6 +1290,152 @@ section("9. persistence.ts — 自動存檔（可注入 storage，因此能在 N
 	for (const t of ["UNIQUE", "DATA_CLEANSING", "RANK", "RUNNING_TOTAL", "CROSS_TAB", "TRANSPOSE"]) {
 		check(`the keyword fallback understands ${t}`, fallbackTypes.includes(t), true);
 	}
+}
+
+// ===========================================================================
+// 11. 靜態掃描修掉的洞（每一條都是實際踩到的）
+// ===========================================================================
+// 這一節守的都不是引擎邏輯，而是「專案自己的一致性」：
+// 衍生產物有沒有跟上來源、設定檔是不是寫給正確版本的工具、
+// 以及那個已經刪掉的死端點有沒有真的消失。
+section("11. repo 一致性 — 衍生產物、設定檔、死程式碼");
+{
+	const catalog = await loadTs("apps/web/src/engine/nodeCatalog.ts");
+	const snapshot = catalog.catalogSnapshot();
+
+	// --- 11a. 兩份衍生產物都要與目錄同步 ---
+	// 產生器現在會寫兩份：後端讀的 JSON，以及 @synapse/schema 讀的 TS。
+	// 以前只守了 JSON，所以 generated.ts 可以悄悄落後（這正是它前一版
+	// 還在描述 DATA_SOURCE / SQL_CUSTOM 的原因）。
+	// 這裡直接叫產生器自己檢查 —— 不在 verify 裡重寫一次渲染邏輯（那會是第二份真相）。
+	let genCheck = { ok: false, detail: "" };
+	try {
+		const out = execFileSync(
+			process.execPath,
+			[join(ROOT, "scripts", "gen_node_catalog.mjs"), "--check"],
+			{ cwd: ROOT, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
+		);
+		genCheck = { ok: true, detail: out.trim() };
+	} catch (err) {
+		genCheck = { ok: false, detail: String(err.stdout || err.message).slice(0, 200) };
+	}
+	check("both generated artefacts are in sync with the catalogue", genCheck.ok, true);
+	if (!genCheck.ok) console.log(`        ${brief(genCheck.detail)}`);
+
+	// --- 11b. @synapse/schema 的型別必須等於目錄 ---
+	// 這是「套件不再描述一個不存在的系統」的唯一證明。
+	const schema = await loadTs("packages/synapse-schema/src/index.ts");
+	check("@synapse/schema lists exactly the catalogued node types",
+		[...schema.NODE_TYPES].sort(), [...snapshot.types].sort());
+	check("@synapse/schema has field metadata for every node type",
+		Object.keys(schema.NODE_FIELDS).sort(), [...snapshot.types].sort());
+
+	// --- 11c. 主要入口不該把 zod 拉進前端 bundle ---
+	// 「零依賴」是這個套件分成兩個入口的理由，所以要用真的 bundle 證明它，
+	// 而不是靠註解宣稱。
+	const bundle = await esbuild.build({
+		entryPoints: [join(ROOT, "packages", "synapse-schema", "src", "index.ts")],
+		bundle: true,
+		format: "esm",
+		platform: "neutral",
+		write: false,
+		metafile: true,
+	});
+	const bundledInputs = Object.keys(bundle.metafile.inputs);
+	check("the main @synapse/schema entry does not pull in zod",
+		bundledInputs.filter((i) => i.includes("zod")), []);
+
+	// --- 11d. 未知型別必須被 schema 擋下 ---
+	// SQL_CUSTOM 就是已刪除的 daedalus.py 一直在吐的型別，而它不在目錄裡，
+	// 所以每個節點都被 patch.ts 靜默退化成 FILTER。
+	const zodMod = await loadTs("packages/synapse-schema/src/zod.ts", { platform: "node" });
+	check("SQL_CUSTOM is not a catalogued type", schema.isNodeType("SQL_CUSTOM"), false);
+	check("AstPatchSchema rejects the type the dead daedalus.py used to emit",
+		zodMod.AstPatchSchema.safeParse({
+			nodes: [{ id: "n0", type: "SQL_CUSTOM", config: { sqlQuery: "SELECT 1" } }],
+			edges: [],
+		}).success,
+		false);
+
+	// --- 11e. 真實的後端 payload 必須被接受 ---
+	// schema 太嚴會擋掉正常輸出 —— 那比沒有 schema 更糟，所以要雙向驗證。
+	if (fallbackPipelines.length === 0) {
+		console.log("  \x1b[33mSKIP\x1b[0m  沒有 fallback pipelines（需要 venv 的 python）—— 無法驗證 schema 不誤擋");
+	} else {
+		let firstReject = null;
+		for (const p of fallbackPipelines) {
+			const r = zodMod.AstPatchSchema.safeParse({ nodes: p.nodes, edges: p.edges });
+			if (!r.success && firstReject === null) {
+				firstReject = `${p.prompt} → ${JSON.stringify(r.error.issues.slice(0, 2))}`;
+			}
+		}
+		check(`all ${fallbackPipelines.length} fallback pipelines validate against AstPatchSchema`,
+			firstReject, null);
+	}
+
+	// --- 11f. auditAstPatch 要一次講清楚所有問題，而不是只報第一個 ---
+	const brokenIssues = schema.auditAstPatch({
+		nodes: [
+			{ id: "n0", type: "SQL_CUSTOM", config: {} }, // 未知型別
+			{ id: "n1", type: "SUMMARIZE", config: { groupby: ["year"] } }, // 幻覺鍵
+			{ id: "n2", type: "FILTER", config: { op: "GREATER" } }, // 缺必填 + 非法 enum
+		],
+		edges: [],
+	});
+	check("audit reports all four issue kinds, not just the first",
+		[...new Set(brokenIssues.map((i) => i.kind))].sort(),
+		["bad-enum", "missing-required", "unknown-key", "unknown-type"]);
+	check("a clean payload produces no audit issues",
+		schema.auditAstPatch({
+			nodes: [{ id: "n0", type: "INPUT_DUCKDB", config: {} }],
+			edges: [],
+		}),
+		[]);
+
+	// --- 11g. 死程式碼真的走了，而且沒有新的同類問題 ---
+	check("the mounted-but-unreachable daedalus endpoint is gone",
+		existsSync(join(ROOT, "apps", "server", "daedalus.py")), false);
+
+	// 掃 apps/server/*.py 裡所有「當成節點型別用的字面值」，全部必須在目錄內。
+	// 這比「SQL_CUSTOM 這個字串有沒有出現」更一般，也更貼近真正的問題：
+	// daedalus.py 的錯不是那個名字，而是「Python 端自己發明了一個目錄沒有的型別」，
+	// 而這種 payload 會被 patch.ts 靜默退化成 FILTER —— 前端看起來正常，做的是錯的事。
+	const serverPy = readdirSync(join(ROOT, "apps", "server")).filter((f) => f.endsWith(".py"));
+	const pyTypeLiterals = new Set();
+	for (const f of serverPy) {
+		const src = readFileSync(join(ROOT, "apps", "server", f), "utf8");
+		for (const m of src.matchAll(/["']type["']\s*:\s*["']([A-Z_]+)["']/g)) pyTypeLiterals.add(m[1]);
+	}
+	check("the Python node-type scan found something (so the check is not vacuous)",
+		pyTypeLiterals.size > 0, true);
+	check("no Python module emits a node type outside the catalogue",
+		[...pyTypeLiterals].filter((t) => !snapshot.types.includes(t)), []);
+
+	// --- 11h. turbo 設定要用 turbo 1.x 認得的鍵 ---
+	// 舊版寫 "tasks"，而 turbo 1.13 只認 "pipeline" —— 結果 root 的
+	// build / dev / lint / clean 四個 script 全部直接失敗。
+	const turboCfg = JSON.parse(readFileSync(join(ROOT, "turbo.json"), "utf8"));
+	check("turbo.json has no dead 'tasks' key", "tasks" in turboCfg, false);
+	check("turbo.json declares a 'pipeline'", typeof turboCfg.pipeline, "object");
+
+	// --- 11i. workspace 套件的 exports 必須指向原始碼，不是 dist ---
+	// dist/ 在 .gitignore 內。若 exports 指向 dist，一次 fresh clone 就會因為
+	// 「dist 不存在」而讓 pnpm dev / vite build 失敗 —— 而且 verify 當時看不到，
+	// 因為它根本沒有 bundle ikaros/core.ts（harness 對這個依賴是盲的）。
+	// 改指 src 之後這個建置順序耦合整個消失。
+	for (const rel of ["packages/ikaros-arrow/package.json", "packages/synapse-schema/package.json"]) {
+		const pj = JSON.parse(readFileSync(join(ROOT, rel), "utf8"));
+		const targets = Object.values(pj.exports ?? {}).flatMap((entry) => Object.values(entry));
+		check(`${pj.name} exports resolve to source, not the gitignored dist/`,
+			targets.filter((t) => String(t).includes("/dist/")), []);
+	}
+
+	// --- 11j. lint 設定真的指向 eslint ---
+	const rootPkg = JSON.parse(readFileSync(join(ROOT, "package.json"), "utf8"));
+	check("root lint script runs eslint", String(rootPkg.scripts?.lint).startsWith("eslint"), true);
+	check("an ESLint config exists", existsSync(join(ROOT, ".eslintrc.cjs")), true);
+	check("eslint is declared as a devDependency",
+		typeof rootPkg.devDependencies?.eslint, "string");
 }
 
 // ===========================================================================
