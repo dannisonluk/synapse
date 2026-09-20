@@ -998,9 +998,31 @@ section("8. exportPolars.ts — Python / Polars 腳本匯出");
 		'.unpivot(on=["amount"], variable_name="metric", value_name="value")');
 	// ⚠ 這條是實測踩出來的：Polars 的 list.get 越界會直接拋錯，
 	//   DuckDB 的 string_split(...)[n] 則回 NULL。必須帶 null_on_oob=True。
+	// literal=True 也是明寫的：Polars 的 str.split 預設是字面比對（1.44 實測），
+	// 但這個預設值在版本之間改過 —— 靠預設等於把語意綁在版本上。
 	has("TEXT_TO_COLUMNS uses null_on_oob so it matches DuckDB",
 		one("TEXT_TO_COLUMNS", { field: "raw", separator: ",", outputColumns: ["p1", "p2"] }),
-		'pl.col("raw").str.split(",").list.get(0, null_on_oob=True).alias("p1")');
+		'pl.col("raw").str.split(",", literal=True).list.get(0, null_on_oob=True).alias("p1")');
+	// SEPARATOR 是字面比對：含 regex 意義的字元（`.` `|` `[`）不該被解讀成樣式。
+	has("TEXT_TO_COLUMNS SEPARATOR mode pins literal=True",
+		one("TEXT_TO_COLUMNS", { field: "raw", separator: ".", outputColumns: ["p1"] }),
+		'str.split(".", literal=True)');
+	has("TEXT_TO_COLUMNS REGEX mode pins literal=False",
+		one("TEXT_TO_COLUMNS", { field: "raw", separator: "\\s+", splitMode: "REGEX", outputColumns: ["p1"] }),
+		'pl.col("raw").str.split("\\\\s+", literal=False).list.get(0, null_on_oob=True).alias("p1")');
+	has("the Polars exporter folds case-insensitivity into (?i) for a regex split",
+		one("TEXT_TO_COLUMNS", { field: "raw", separator: "x", splitMode: "REGEX", caseInsensitive: true, outputColumns: ["p1"] }),
+		'str.split("(?i)x", literal=False)');
+	has("the Polars exporter does not double an explicit (?i) in a split pattern",
+		one("TEXT_TO_COLUMNS", { field: "raw", separator: "(?i)x", splitMode: "REGEX", caseInsensitive: true, outputColumns: ["p1"] }),
+		"(?i)(?i)", false);
+	// 空樣式在 Polars 也不是無害的 —— 與 SQL 端一致，passthrough。
+	has("the Polars exporter treats an empty REGEX pattern as a passthrough",
+		one("TEXT_TO_COLUMNS", { field: "raw", separator: "", splitMode: "REGEX", outputColumns: ["p1"] }),
+		"passthrough");
+	has("the Polars exporter falls back to SEPARATOR for a mode outside the whitelist",
+		one("TEXT_TO_COLUMNS", { field: "raw", separator: ",", splitMode: "DROP TABLE", outputColumns: ["p1"] }),
+		"literal=True");
 	has("MULTI_ROW_FORMULA maps LAG to shift",
 		one("MULTI_ROW_FORMULA", { outputColumn: "prev", expression: "LAG(amount, 1)", orderBy: "seq" }),
 		'pl.col("amount")).shift(1)).over(order_by="seq")');
@@ -1406,6 +1428,53 @@ section("8. exportPolars.ts — Python / Polars 腳本匯出");
 			// 數值運算式：這一條就是「.alias 綁定優先」那個 bug 的守門
 			check("MULTI_FIELD_FORMULA parenthesises before .alias (numeric expression runs)",
 				mffOut.includes("MFF_AMOUNT=[20, 40]"), true);
+
+			// --- TEXT_TO_COLUMNS 的正規表示式切分：跨引擎對照 ---
+			// 同一組樣式在 SQL 那邊（verify_duckdb_wasm.mjs 的
+			// 「REGEX splits on a variable-length pattern」）也跑一次，
+			// 兩邊的預期值刻意寫成一樣 —— 這就是「兩個引擎算同一件事」的證明。
+			const t2cDir = mkdtempSync(join(tmpdir(), "synapse-t2c-run-"));
+			writeFileSync(join(t2cDir, "t2c.csv"), "raw,id\n\"a , b\",1\n\"a1b22c\",2\n\"NOPE\",3\n", "utf8");
+			const t2cChain = polars.exportToPolars([
+				mk("node_in", { label: "Input", type: "INPUT_DUCKDB", config: { fileName: "t2c.csv" } }),
+				mk("node_s", { label: "Split", type: "TEXT_TO_COLUMNS", config: {
+					field: "raw", separator: "\\s*,\\s*", splitMode: "REGEX", outputColumns: ["q1", "q2"] } }),
+				mk("node_n", { label: "Digits", type: "TEXT_TO_COLUMNS", config: {
+					field: "raw", separator: "\\d+", splitMode: "REGEX", outputColumns: ["d1", "d2", "d3"] } }),
+			], [
+				{ id: "t1", source: "node_in", target: "node_s", targetHandle: "left" },
+				{ id: "t2", source: "node_s", target: "node_n", targetHandle: "left" },
+			]);
+			check("the regex-split chain needs no manual review", t2cChain.needsReview, []);
+
+			const t2cScript = t2cChain.script + "\n" + [
+				'print("T2C_Q1=" + repr(node_n["q1"].to_list()))',
+				'print("T2C_Q2=" + repr(node_n["q2"].to_list()))',
+				'print("T2C_D=" + repr(node_n["d1"].to_list()) + repr(node_n["d2"].to_list()))',
+				"",
+			].join("\n");
+			const t2cScriptPath = join(t2cDir, "t2c.py");
+			writeFileSync(t2cScriptPath, t2cScript, "utf8");
+			let t2cOut = null;
+			try {
+				t2cOut = execFileSync(polarsPy, [t2cScriptPath], {
+					cwd: t2cDir,
+					encoding: "utf8",
+					stdio: ["ignore", "pipe", "pipe"],
+					env: { ...process.env, POLARS_SKIP_CPU_CHECK: "1" },
+				});
+			} catch (err) {
+				t2cOut = String(err.stdout || "") + String(err.stderr || err.message);
+			}
+			check("the generated regex-split script actually runs",
+				t2cOut.includes("T2C_Q1=['a', 'a1b22c', 'NOPE']"), true);
+			// '\s*,\s*' 是可變長度分隔符 —— 單一固定分隔符做不到這件事
+			check("the Polars regex split handles a variable-length pattern",
+				t2cOut.includes("T2C_Q2=['b', None, None]"), true);
+			// '\d+' 在 'a1b22c' 上切出 a / b / c；'a , b' 沒有數字所以整段留著。
+			// 第一個 list 是 d1、第二個是 d2（上面刻意把兩次 repr 接在一起印）。
+			check("TEXT_TO_COLUMNS REGEX handles a multi-hit pattern",
+				t2cOut.includes("T2C_D=['a , b', 'a', 'NOPE'][None, 'b', None]"), true);
 		}
 	}
 }

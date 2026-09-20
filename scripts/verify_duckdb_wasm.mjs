@@ -710,6 +710,51 @@ export async function runDuckDbWasmChecks(root, loadTs, fallbackPipelines = []) 
 		compiler.compileNodeSelect("x", "TEXT_TO_COLUMNS", { field: "raw", outputColumns: [] }, ["t2c_src"]),
 		'SELECT * FROM "t2c_src"');
 
+	// --- 11d-2. TEXT_TO_COLUMNS 的正規表示式切分模式 ---
+	// SEPARATOR 是**字面**比對（string_split 不做 regex），REGEX 才是樣式。
+	// 這個區分本身就是重點：一個含 '.' 或 '|' 的分隔符在兩種模式下結果完全不同。
+	const t2cRe = compiler.compileNodeSelect(
+		"node_t2c_re", "TEXT_TO_COLUMNS",
+		{ field: "raw", separator: "\\s*,\\s*", splitMode: "REGEX", outputColumns: ["q1", "q2"] },
+		["t2c_src"]);
+	add("TEXT_TO_COLUMNS REGEX mode emits regexp_split_to_array",
+		t2cRe.includes("regexp_split_to_array("), true);
+	add("TEXT_TO_COLUMNS SEPARATOR mode does not use a regex splitter",
+		compiler.compileNodeSelect("x", "TEXT_TO_COLUMNS",
+			{ field: "raw", separator: ",", outputColumns: ["a"] }, ["t2c_src"]).includes("regexp_split_to_array"),
+		false);
+	conn.query("CREATE OR REPLACE TABLE re_t2c_src AS SELECT * FROM (VALUES (1, 'a , b'), (2, 'a1b22c'), (3, NULL)) AS t(id, raw);");
+	const t2cReRun = compiler.compileNodeSelect(
+		"node_t2c_re_run", "TEXT_TO_COLUMNS",
+		{ field: "raw", separator: "\\s*,\\s*", splitMode: "REGEX", outputColumns: ["q1", "q2"] },
+		["re_t2c_src"]);
+	conn.query(`CREATE OR REPLACE TABLE node_t2c_re_run AS ${t2cReRun};`);
+	// 可變長度的樣式：'a , b' 用 '\s*,\s*' 切成 a / b（單一分隔符做不到）
+	add("TEXT_TO_COLUMNS REGEX splits on a variable-length pattern",
+		q("SELECT q1, q2 FROM node_t2c_re_run WHERE id = 1;"), [["a", "b"]]);
+	// 越界與 NULL 的行為必須與 SEPARATOR 模式一致
+	add("TEXT_TO_COLUMNS REGEX returns NULL for a missing segment",
+		q("SELECT q2 FROM node_t2c_re_run WHERE id = 2;"), [["null"]]);
+	add("TEXT_TO_COLUMNS REGEX passes NULL through",
+		q("SELECT q1 FROM node_t2c_re_run WHERE id = 3;"), [["null"]]);
+	// 忽略大小寫折進 (?i)，與 REGEX 節點同一套規則
+	add("TEXT_TO_COLUMNS REGEX folds case-insensitivity into (?i)",
+		compiler.compileNodeSelect("x", "TEXT_TO_COLUMNS",
+			{ field: "raw", separator: "x", splitMode: "REGEX", caseInsensitive: true, outputColumns: ["a"] },
+			["t2c_src"]).includes("'(?i)x'"),
+		true);
+	// 空樣式會讓 regexp_split_to_array 逐字元切一刀，產生一堆無意義欄位 ——
+	// 與 REGEX 節點一致，沒有樣式就 passthrough。
+	add("TEXT_TO_COLUMNS REGEX with an empty pattern is a passthrough",
+		compiler.compileNodeSelect("x", "TEXT_TO_COLUMNS",
+			{ field: "raw", separator: "", splitMode: "REGEX", outputColumns: ["a"] }, ["t2c_src"]),
+		'SELECT * FROM "t2c_src"');
+	add("TEXT_TO_COLUMNS falls back to SEPARATOR for a mode outside the whitelist",
+		compiler.compileNodeSelect("x", "TEXT_TO_COLUMNS",
+			{ field: "raw", separator: ",", splitMode: "DROP TABLE", outputColumns: ["a"] }, ["t2c_src"])
+			.includes("string_split("),
+		true);
+
 	// 11e. REGEX：MATCH / PARSE / REPLACE
 	// 這一段刻意把「未命中」與「NULL 輸入」都測到：regexp_extract 未命中時回
 	// **空字串**而不是 NULL，這是與 Polars str.extract 的已知差異（見 exportPolars），

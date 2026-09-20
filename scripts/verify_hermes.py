@@ -127,6 +127,29 @@ check("fallback picks exactly one node for unpivot (not pivot+transpose)",
 check("every fallback node type is in the catalogue",
       sorted({s["type"] for s in hermes._FALLBACK_STEPS} - set(hermes.VALID_NODE_TYPES)), [])
 
+# --- fallback 的 config，不只是節點型別 ---------------------------------------
+# 上面那批只證明「挑對了節點型別」。節點型別對、config 錯的 pipeline 一樣跑得動，
+# 只是算出來的東西不對 —— 所以最關鍵的那幾個 config 值要單獨釘住。
+# _fallback_ast_patch 一定會在最前面補一個 INPUT_DUCKDB，這裡只看工具節點。
+def _tools(prompt):
+    return [n for n in hermes._fallback_ast_patch(prompt)["nodes"]
+            if n["type"] != "INPUT_DUCKDB"]
+
+
+check("the MULTI_FIELD_FORMULA fallback carries a _CurrentField_ expression",
+      [("_CurrentField_" in str(n["config"].get("expression", "")))
+       for n in _tools("multi-field formula on all fields")], [True])
+
+# 「用樣式拆欄」必須只產生**一個**節點，而且它的 config 必須真的切到 REGEX。
+# 少了 splitMode=REGEX 的話 pipeline 照樣跑得動，只是按字面逗號拆 —— 沒有錯誤訊息。
+_split = _tools("split by regex")
+check("the regex-split fallback actually sets splitMode=REGEX",
+      [n["config"].get("splitMode") for n in _split], ["REGEX"])
+check("regex splitting produces exactly one node (it shadows both 'split' and 'regex')",
+      len(_split), 1)
+check("the plain split fallback stays on SEPARATOR mode",
+      [n["config"].get("splitMode") for n in _tools("split item by comma")], [None])
+
 # ---------------------------------------------------------------------------
 print(f"\n{len(FAILS)} failed" if FAILS else "\nALL PASS")
 sys.exit(1 if FAILS else 0)
