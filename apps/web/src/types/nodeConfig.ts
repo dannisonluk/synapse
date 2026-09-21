@@ -154,6 +154,11 @@ export const NODE_CONFIG_SHAPE = {
 	/** 把算出來的距離寫進這個欄位名；空字串 = 不輸出 */
 	distanceColumn: "string",
 
+	// --- OUTPUT -----------------------------------------------------------
+	// fileName 與 INPUT_DUCKDB 共用（兩者都是「這個節點關聯的檔案」）。
+	/** 輸出格式：CSV | JSON。Polars 匯出會真的寫檔；DuckDB 由 UI 的下載鈕產生 */
+	outputFormat: "string",
+
 	// --- SELECT / UNION / SAMPLE -----------------------------------------
 	/** SELECT 要投影的欄位；空陣列 = 全選 */
 	columns: "string[]",

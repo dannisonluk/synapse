@@ -14,7 +14,7 @@
 import type { Edge, Node } from "@xyflow/react";
 import { orderUpstreamSources, topologicalSort } from "./scheduler";
 import { resolveSourceTables, falseBranchTable } from "./astCompiler";
-import { safeOp, safeFunc, safeJoinType, safeFuzzyJoinType, safeExpr, safeUnionMode, safeSampleMode, safeImputeMethod, safeRankMethod, safeUnmatched, safeRegexMode, regexPattern, safeMultiFieldOutputMode, safeNewFieldSuffix, hasCurrentField, applyCurrentField, safeSplitMode, safeMatchFunc, matchIsSimilarity, matchThreshold, safePrefilter, safeScoreColumn, intLit } from "./sql";
+import { safeOp, safeFunc, safeJoinType, safeFuzzyJoinType, safeExpr, safeUnionMode, safeSampleMode, safeImputeMethod, safeRankMethod, safeUnmatched, safeRegexMode, regexPattern, safeMultiFieldOutputMode, safeNewFieldSuffix, hasCurrentField, applyCurrentField, safeSplitMode, safeMatchFunc, matchIsSimilarity, matchThreshold, safePrefilter, safeScoreColumn, safeOutputFormat, safeOutputFileName, intLit } from "./sql";
 
 // ---------------------------------------------------------------------------
 // Python literal / identifier
@@ -766,6 +766,26 @@ function emitNode(
 			}
 
 			return code.join("\n");
+		}
+
+		case "OUTPUT": {
+			// 這裡是少數「Polars 端比 DuckDB 端更完整」的地方：DuckDB 那條路的下載
+			// 是瀏覽器行為（UI 讀表再序列化），而 Polars 可以直接把 DataFrame 寫檔。
+			//
+			// 檔名一律過 safeOutputFileName()：它會被寫成 Python 字面值，而使用者
+			// 可以貼進路徑分隔符或 .. —— 不允許寫到預期之外的目錄。副檔名也由格式
+			// 決定，避免出現「.csv 檔裝 JSON 內容」這種開得起來但讀不到的錯。
+			const fmt = safeOutputFormat(config?.outputFormat);
+			const name = safeOutputFileName(config?.fileName, fmt);
+			const writer = fmt === "JSON" ? "write_json" : "write_csv";
+			ctx.notes.push(
+				`節點 ${id}：會寫出檔案 ${name}（${fmt}）。DuckDB 那條路沒有這個行為 —— ` +
+					`畫布上的下載鈕才是等價物。`,
+			);
+			return [
+				`${id} = ${src}`,
+				`${id}.${writer}(${pyStr(name)})  # 匯出 → ${name}`,
+			].join("\n");
 		}
 
 		case "SPATIAL_MATCH": {

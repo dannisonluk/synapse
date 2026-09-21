@@ -23,7 +23,11 @@ import {
 	matchThresholdDefault,
 	safeSpatialPredicate,
 	safeDistanceUnit,
+	safeOutputFormat,
+	safeOutputFileName,
 } from "../../../engine/sql";
+import { toCsv } from "../../../engine/csv";
+import { downloadText } from "../../../lib/download";
 import {
 	useUpstreamColumns,
 	type UpstreamColumn,
@@ -201,6 +205,108 @@ const FieldListEditor: React.FC<{
 		)}
 	</div>
 );
+
+/**
+ * OUTPUT 節點下載時最多拉幾列。
+ *
+ * 刻意不用 ikaros 的 DEFAULT_MAX_ROWS（5000）—— 那是「預覽」的上限，拿它當
+ * 下載上限會讓使用者在毫不知情的情況下拿到被截斷的檔案。但也刻意不無上限：
+ * 整表拉進 main thread 會把瀏覽器鎖死。超上限時如實告知（見 status 文字）。
+ */
+const DOWNLOAD_MAX_ROWS = 200000;
+
+/**
+ * OUTPUT 節點的下載鈕。
+ *
+ * 為什麼是模組層級元件、而不是 inline JSX：其他表單區塊都是 IIFE（為了放區域
+ * type 與小工具函式），而 IIFE 內不能呼叫 hook。這裡需要 useState（忙碌 / 錯誤 /
+ * 結果文字），所以只能拉出來。
+ *
+ * 資料來源刻意與節點執行共用同一條路徑 —— 節點執行時會建立一張以自己 id 為名的
+ * 表（見 astCompiler 的 OUTPUT case），outputTableFor() 也是回傳這個 id。所以
+ * 「下載到的」與「畫布上看到的」保證是同一份資料，不是另外再查一次上游。
+ */
+const OutputDownloadButton: React.FC<{
+	nodeId: string;
+	/** 未清理的檔名（config 原值）；真正的檔名由 safeOutputFileName 決定 */
+	fileName: unknown;
+	format: unknown;
+	/** 上游欄位（= 輸出表的欄位），用來固定 CSV 的欄位順序 */
+	columns: UpstreamColumn[];
+	className: string;
+}> = ({ nodeId, fileName, format, columns, className }) => {
+	const [busy, setBusy] = useState(false);
+	const [status, setStatus] = useState("");
+	const [failed, setFailed] = useState(false);
+
+	const run = async () => {
+		setBusy(true);
+		setStatus("");
+		setFailed(false);
+		try {
+			const { rows, truncated } = await ikaros.queryDetailed(
+				`SELECT * FROM ${qi(nodeId)}`,
+				DOWNLOAD_MAX_ROWS,
+			);
+			const fmt = safeOutputFormat(format);
+			const name = safeOutputFileName(fileName, fmt);
+			// CSV 明確給欄位順序：查詢結果的鍵序才是使用者看到的順序，
+			// 而 Object.keys(rows[0]) 在 0 列時會退化成空表頭。
+			const text =
+				fmt === "JSON"
+					? // BigInt 不能進 JSON.stringify（會直接 throw）→ 轉字串
+						JSON.stringify(
+							rows,
+							(_k, v) => (typeof v === "bigint" ? v.toString() : v),
+							2,
+						)
+					: toCsv(
+							rows,
+							columns.map((c) => c.name),
+						);
+			downloadText(
+				name,
+				text,
+				fmt === "JSON" ? "application/json" : "text/csv",
+			);
+			setStatus(
+				`已下載 ${name}（${rows.length} 列）` +
+					(truncated
+						? ` —— 已達 ${DOWNLOAD_MAX_ROWS} 列上限，檔案不完整`
+						: ""),
+			);
+			if (truncated) setFailed(true);
+		} catch (e) {
+			setFailed(true);
+			setStatus(`下載失敗：${e instanceof Error ? e.message : String(e)}`);
+		} finally {
+			setBusy(false);
+		}
+	};
+
+	return (
+		<div className="space-y-1">
+			<button
+				type="button"
+				onClick={run}
+				disabled={busy}
+				title="讀取這個節點的輸出表並存成檔案（需先執行過這個節點）"
+				className={className}
+			>
+				{busy ? "讀取中…" : "⬇ 下載"}
+			</button>
+			{status && (
+				<div
+					className={`text-[9px] font-mono leading-tight ${
+						failed ? "text-rose-500" : "opacity-60"
+					}`}
+				>
+					{status}
+				</div>
+			)}
+		</div>
+	);
+};
 
 export const AlteryxNode: React.FC<NodeProps<Node<AlteryxNodeData>>> = ({
 	id,
@@ -1344,6 +1450,70 @@ export const AlteryxNode: React.FC<NodeProps<Node<AlteryxNodeData>>> = ({
 								CONTAINS 是「左包含右」、WITHIN 是「左落在右之內」，方向相反。
 								{unit === "METERS" &&
 									" METERS 走 ST_Distance_Sphere，這個 build 的它不補經度收斂，離開赤道會高估東西向距離；要精確請用 DEGREES。"}
+							</div>
+						</div>
+					);
+				})()}
+
+				{/* 5d. OUTPUT 節點介面 */}
+				{nodeType === "OUTPUT" && (() => {
+					const fmt = safeOutputFormat(config.outputFormat);
+					// 顯示「實際會用的檔名」而不是原值 —— 使用者打了 output.csv 但選 JSON
+					// 時，這裡要立刻看出它會變成 output.json。
+					const name = safeOutputFileName(config.fileName, fmt);
+					return (
+						<div
+							className={`p-2 rounded border space-y-1 ${
+								isLight
+									? "bg-stone-50/80 border-stone-200/60"
+									: "bg-slate-900/60 border-slate-800"
+							}`}
+						>
+							<div className="text-[9px] font-bold font-mono tracking-wider opacity-60 uppercase">
+								Output
+							</div>
+
+							<div className="flex space-x-1">
+								<input
+									value={String(config.fileName ?? "")}
+									onChange={(e) => updateConfig("fileName", e.target.value)}
+									placeholder="output.csv"
+									title="下載與匯出用的檔名"
+									className={`flex-1 ${inputCls}`}
+								/>
+								<select
+									value={fmt}
+									onChange={(e) => updateConfig("outputFormat", e.target.value)}
+									title="輸出格式（決定副檔名）"
+									className={`w-20 ${selectCls}`}
+								>
+									<option value="CSV">CSV</option>
+									<option value="JSON">JSON</option>
+								</select>
+							</div>
+
+							<OutputDownloadButton
+								nodeId={id}
+								fileName={config.fileName}
+								format={config.outputFormat}
+								columns={upstream.byTable[0] || []}
+								className={`w-full py-1 rounded border text-[10px] font-mono ${
+									isLight
+										? "bg-amber-50 border-amber-300 text-amber-700 hover:bg-amber-100"
+										: "bg-amber-500/10 border-amber-500/40 text-amber-400 hover:bg-amber-500/20"
+								} disabled:opacity-40`}
+							/>
+
+							<div className="text-[9px] font-mono opacity-50 leading-tight">
+								實際檔名：{name}（路徑與「..」會被剝掉，副檔名一律跟著格式走）
+							</div>
+
+							{/* 兩個引擎的語意不同，講清楚而不是假裝一致：
+							    DuckDB 版只是把上游「命名」成一個終點（資料還在記憶體），
+							    真的落地寫檔只發生在 Polars 匯出的腳本裡。 */}
+							<div className="text-[9px] font-mono opacity-50 leading-tight">
+								這個節點在畫布上只是命名的終點（結果留在記憶體，可下載）；
+								真的寫成檔案是 Polars 匯出腳本裡的 write_csv / write_json。
 							</div>
 						</div>
 					);

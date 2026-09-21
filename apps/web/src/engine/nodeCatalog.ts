@@ -802,6 +802,38 @@ export const NODE_CATALOG: Record<AlteryxNodeType, NodeSpec> = {
 		],
 	},
 
+	OUTPUT: {
+		type: "OUTPUT",
+		label: "Output Data",
+		category: "In/Out",
+		description: "標記工作流的輸出，並可把結果下載成 CSV / JSON 檔。",
+		whenToUse:
+			"使用者說「輸出 / 下載 / 匯出成檔案 / 存成 CSV / output / export / 給我一份檔案」時。" +
+			"它不改資料，只是把上游結果標成明確的終點。",
+		inputs: 1,
+		nodeType: "alteryxNode",
+		icon: "Download",
+		color: "text-amber-500",
+		defaults: { fileName: "output.csv", outputFormat: "CSV" },
+		fields: [
+			{
+				name: "fileName",
+				kind: "text",
+				label: "輸出檔名",
+				default: "output.csv",
+				hint: "下載時的檔名。副檔名會跟著格式自動修正（JSON 就是 .json），路徑分隔符會被去掉。",
+			},
+			{
+				name: "outputFormat",
+				kind: "enum",
+				label: "格式",
+				values: ["CSV", "JSON"],
+				default: "CSV",
+				hint: "CSV 適合試算表；JSON 適合再進程式處理。匯出的 Polars 腳本會真的寫出這個檔案。",
+			},
+		],
+	},
+
 	UNION: {
 		type: "UNION",
 		label: "Union",

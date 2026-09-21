@@ -560,6 +560,15 @@ export function compileNodeSelect(
 			return `SELECT a.*, b.*${distSelect} FROM ${qi(leftTable)} a ${joinType} JOIN ${qi(rightTable)} b ON ${condition}`;
 		}
 
+		case "OUTPUT": {
+			// 輸出節點不改資料，只是把上游結果「命名」成一個明確的終點。
+			// 它照樣建一張以自己 id 為名的表，於是：
+			//   - UI 的下載鈕可以讀這張表（outputTableFor 回傳 nodeId）
+			//   - 匯出的 CTE 腳本會把它當成最終 SELECT 的來源
+			// 這樣「下載到的」與「畫布上看到的」保證是同一份資料。
+			return `SELECT * FROM ${qi(sourceTable)}`;
+		}
+
 		case "SORT": {
 			// field 優先（UI 表單綁定 field）；groupBy 保留作為 Hermes 舊 payload 的
 			// fallback —— 但它現在可能是陣列（SUMMARIZE 的多分組鍵），取第一個即可。

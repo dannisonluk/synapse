@@ -46,6 +46,7 @@ import {
 	type SerializedNode,
 } from "../../engine/exporter";
 import { exportToPolars } from "../../engine/exportPolars";
+import { downloadText } from "../../lib/download";
 import { getLayoutedElements } from "../../engine/autoLayout";
 import { resolveAstPatch, toFlowEdges } from "../../engine/patch";
 import {
@@ -163,20 +164,6 @@ async function chaosRepair(
 		// 後端未啟動 → 靜默 fallback
 	}
 	return null;
-}
-
-/** 觸發瀏覽器下載（純前端，不需要後端） */
-function downloadText(filename: string, text: string, mime = "text/plain") {
-	const blob = new Blob([text], { type: `${mime};charset=utf-8` });
-	const url = URL.createObjectURL(blob);
-	const a = document.createElement("a");
-	a.href = url;
-	a.download = filename;
-	document.body.appendChild(a);
-	a.click();
-	document.body.removeChild(a);
-	// click() 是同步的，但瀏覽器讀取 blob 是非同步 → 延遲 revoke 最穩妥
-	setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
 /**

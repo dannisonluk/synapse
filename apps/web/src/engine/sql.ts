@@ -192,6 +192,42 @@ export function safeDistanceColumn(value: unknown, fallback = ""): string {
 	return s || fallback;
 }
 
+/** OUTPUT 的格式白名單 */
+const ALLOWED_OUTPUT_FORMATS = new Set(["CSV", "JSON"]);
+
+export function safeOutputFormat(f: unknown, fallback = "CSV"): string {
+	const normalized = String(f ?? "").trim().toUpperCase();
+	return ALLOWED_OUTPUT_FORMATS.has(normalized) ? normalized : fallback;
+}
+
+/**
+ * OUTPUT 的檔名。
+ *
+ * 兩個理由讓它必須被清乾淨，而不是直接拿使用者的輸入：
+ *   1. 這個字串會被寫進匯出的 Python 腳本當字面值，也可能變成瀏覽器下載的檔名。
+ *      路徑分隔符與 `..` 會讓 `write_csv("../../x.csv")` 寫到預期之外的位置。
+ *   2. 副檔名必須跟著格式走。`output.csv` 裝 JSON 內容是那種「開得起來但讀不到」
+ *      的錯，而且不會有任何錯誤訊息。
+ */
+export function safeOutputFileName(
+	value: unknown,
+	format: string = "CSV",
+	fallback = "output",
+): string {
+	// 反斜線一律當分隔符（Windows 來的路徑），只取最後一段
+	const base = String(value ?? "").trim().replace(/\\/g, "/").split("/").pop() ?? "";
+	const stem =
+		base
+			// 去掉 .. 與前導點（`.hidden` / `..` 都不該變成檔名）
+			.replace(/\.\./g, "")
+			.replace(/^\.+/, "")
+			// 去掉既有副檔名 —— 由 format 決定，不讓兩者不一致
+			.replace(/\.(csv|json|tsv|txt)$/i, "")
+			.trim() || fallback;
+	const ext = safeOutputFormat(format) === "JSON" ? ".json" : ".csv";
+	return `${stem}${ext}`;
+}
+
 /**
  * UNION 的欄位對齊方式。
  *   BY_NAME  → `UNION ALL BY NAME`：按欄位名對齊，缺欄位補 NULL（Alteryx 的 Union 語意）
