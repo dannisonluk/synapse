@@ -34,6 +34,12 @@ import {
 	duckdbMatchFn,
 	safePrefilter,
 	safeScoreColumn,
+	safeSpatialPredicate,
+	SPATIAL_DWITHIN,
+	duckdbSpatialFn,
+	safeDistanceUnit,
+	safeSpatialJoinType,
+	safeDistanceColumn,
 	intLit,
 } from "./sql";
 import type { Edge } from "@xyflow/react";
@@ -486,6 +492,74 @@ export function compileNodeSelect(
 			return `SELECT a.*, b.*${scoreCol} FROM ${qi(leftTable)} a ${joinType} JOIN ${qi(rightTable)} b ON ${condition}`;
 		}
 
+		case "SPATIAL_MATCH": {
+			const leftTable = upstreamNodeIds[0] || "raw_data";
+			const rightTable = upstreamNodeIds[1] || "raw_data";
+
+			// 每側的幾何有兩條路：WKT 欄位，或 lon/lat 兩欄。WKT 優先 ——
+			// 它能表達非點幾何（多邊形、線），表達力嚴格更強。
+			//
+			// WKT 一律包 TRY()：實測壞掉的 WKT 會讓 ST_GeomFromText **拋錯**
+			// （Invalid Input Error: Expected geometry type...），而不是回 NULL。
+			// 不包的話，一千萬列裡有一列 WKT 壞掉就整個 join 掛掉；包了之後那一列
+			// 變成 NULL 幾何 → 謂詞回 NULL → 不命中，也就是 GIS 界的慣例行為。
+			const geomExpr = (
+				wktField: unknown,
+				lonField: unknown,
+				latField: unknown,
+				alias: string,
+			): string | null => {
+				const wkt = String(wktField ?? "").trim();
+				if (wkt) return `TRY(ST_GeomFromText(${alias}.${qi(wkt)}))`;
+				const lon = String(lonField ?? "").trim();
+				const lat = String(latField ?? "").trim();
+				if (lon && lat) {
+					// 實測 ST_Point(x, y) → ST_X = 第一個參數，所以是 (經度, 緯度)。
+					// TRY_CAST：欄位可能是 VARCHAR（CSV 進來的大多數經緯度都是），
+					// ST_Point 收到字串會直接報錯。
+					return `ST_Point(TRY_CAST(${alias}.${qi(lon)} AS DOUBLE), TRY_CAST(${alias}.${qi(lat)} AS DOUBLE))`;
+				}
+				return null;
+			};
+
+			const lGeom = geomExpr(
+				config.leftGeometryField, config.leftLonField, config.leftLatField, "a");
+			const rGeom = geomExpr(
+				config.rightGeometryField, config.rightLonField, config.rightLatField, "b");
+
+			// 幾何無從取得就退回左表 passthrough，不猜欄位名 ——
+			// 猜錯會產生一個「跑得動但完全錯」的笛卡兒積（與 FUZZY_JOIN 同理）。
+			if (!lGeom || !rGeom) return `SELECT * FROM ${qi(leftTable)}`;
+
+			const predicate = safeSpatialPredicate(config.spatialPredicate);
+			const unit = safeDistanceUnit(config.distanceUnit);
+
+			// 距離表達式是這一節唯一的真相：篩選用它、輸出欄位也用它。
+			// 分開寫的話就會出現「門檻換了單位、輸出欄位沒換」這種半套 ——
+			// 而且不會報錯，只是數字悄悄地差了 111194.93 倍。
+			const distanceExpr =
+				unit === "METERS"
+					? `ST_Distance_Sphere(${lGeom}, ${rGeom})`
+					: `ST_Distance(${lGeom}, ${rGeom})`;
+
+			let condition: string;
+			if (predicate === SPATIAL_DWITHIN) {
+				// 刻意不呼叫 ST_DWithin：這樣距離的單位轉換只發生在一個地方，
+				// 而且「篩選」與「輸出」用的一定是同一個表達式。
+				// 門檻走 lit()：非數字會被它擋掉，沒有引號可以逃逸。
+				condition = `${distanceExpr} <= ${lit(config.distance ?? 0)}`;
+			} else {
+				condition = `${duckdbSpatialFn(predicate)}(${lGeom}, ${rGeom})`;
+			}
+
+			const joinType = safeSpatialJoinType(config.joinType, "INNER");
+			const distCol = safeDistanceColumn(config.distanceColumn);
+			const distSelect = distCol ? `, ${distanceExpr} AS ${qi(distCol)}` : "";
+
+			// 與 JOIN / FUZZY_JOIN 一致：保留左右兩表全部欄位。
+			return `SELECT a.*, b.*${distSelect} FROM ${qi(leftTable)} a ${joinType} JOIN ${qi(rightTable)} b ON ${condition}`;
+		}
+
 		case "SORT": {
 			// field 優先（UI 表單綁定 field）；groupBy 保留作為 Hermes 舊 payload 的
 			// fallback —— 但它現在可能是陣列（SUMMARIZE 的多分組鍵），取第一個即可。
@@ -812,12 +886,24 @@ export function compileNodeStatements(
 ): string[] {
 	const body = compileNodeSelect(nodeId, nodeType, config, upstreamNodeIds);
 
-	// VIZ_CHART 不建表，只回傳一個有界的 SELECT
-	if (!producesOutputTable(nodeType)) return [`${body};`];
+	// 需要 DuckDB 擴充的節點，前面補一句 LOAD。
+	//
+	// 為什麼非補不可（實測，不是保險起見）：出貨的 duckdb-wasm 把 spatial
+	// **靜態連結**進去了，所以 `LOAD spatial` 會成功、而 `INSTALL spatial` 是
+	// no-op（installed 永遠是 false，因為 wasm 版沒有網路）。但一條**全新連線**
+	// 預設是沒載入的 —— 直接呼叫會得到
+	//   Catalog Error: Scalar Function with name "st_intersects" is not in the
+	//   catalog, but it exists in the spatial extension
+	// 所以這句是必要的，而且重複執行無害（同一批語句裡 LOAD 兩次也沒問題）。
+	const statements: string[] = requiredExtensions(nodeType).map((ext) => `LOAD ${ext};`);
 
-	const statements = [
-		`CREATE OR REPLACE TEMP TABLE ${qi(nodeId)} AS ${body};`,
-	];
+	// VIZ_CHART 不建表，只回傳一個有界的 SELECT
+	if (!producesOutputTable(nodeType)) {
+		statements.push(`${body};`);
+		return statements;
+	}
+
+	statements.push(`CREATE OR REPLACE TEMP TABLE ${qi(nodeId)} AS ${body};`);
 
 	if (nodeType === "FILTER" && opts.falseBranch !== false) {
 		const sourceTable =
@@ -828,6 +914,16 @@ export function compileNodeStatements(
 	}
 
 	return statements;
+}
+
+/**
+ * 這個節點型別需要哪些 DuckDB 擴充（會在語句前面補 LOAD）。
+ *
+ * 用函式而不是散落的 if，是為了讓「需要擴充的節點」只有一處真相 ——
+ * 匯出的 SQL 腳本（exporter.ts）也要問同一個問題。
+ */
+export function requiredExtensions(nodeType: string): string[] {
+	return nodeType === "SPATIAL_MATCH" ? ["spatial"] : [];
 }
 
 /**

@@ -768,6 +768,27 @@ function emitNode(
 			return code.join("\n");
 		}
 
+		case "SPATIAL_MATCH": {
+			// 這是全專案唯一一個「兩邊引擎不可能一致」的節點：Polars 沒有空間函式
+			// （沒有 GEOS 綁定，整個 API 都沒有 ST_* 的對應物）。
+			//
+			// 所以這裡刻意**不**做成 passthrough —— 一個「只回左表」的輸出看起來
+			// 像 join 成功了，實際上是無聲地少了一整張表，正是本檔開頭說要避免的
+			// 那種「看起來能跑但算錯的腳本」。改成留一個空 DataFrame 佔位：
+			// 它不可能被誤認成結果，而且下游一引用欄位就會 NameError（大聲失敗）。
+			ctx.needsReview = true;
+			ctx.notes.push(
+				`節點 ${id}：Polars 沒有空間函式，SPATIAL_MATCH 只在 DuckDB 那條路成立。` +
+					`已留空佔位（不是 join 結果），請改用 DuckDB 執行或改用 SQL 匯出。`,
+			);
+			return [
+				"# TODO: SPATIAL_MATCH 無法翻譯成 Polars —— Polars 沒有空間函式（ST_*）。",
+				"#   DuckDB 那邊靠 LOAD spatial + ST_Intersects / ST_DWithin 完成。",
+				"#   要跑這個節點請用 DuckDB 執行，或改用 SQL 匯出（CTE）。",
+				`${id} = pl.DataFrame()  # 空佔位 —— 這不是 join 結果，欄位也不對`,
+			].join("\n");
+		}
+
 		case "SORT": {
 			const legacy = Array.isArray(config?.groupBy) ? config.groupBy[0] : config?.groupBy;
 			const by = config?.field || legacy || "id";

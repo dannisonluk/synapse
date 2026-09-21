@@ -126,6 +126,34 @@ export const NODE_CONFIG_SHAPE = {
 	/** 候選對縮減：NONE | FIRST_CHAR（只比首字元相同的配對，省掉大部分 O(n*m)） */
 	prefilter: "string",
 
+	// --- SPATIAL_MATCH ----------------------------------------------------
+	// 幾何來源有兩條路，每側二選一：WKT 欄位，或 lon/lat 兩欄。
+	// 兩條都給時以 WKT 為準（WKT 可以是非點幾何，表達力更強）。
+	/** 左表的 WKT 幾何欄位；留空則改用 leftLonField / leftLatField */
+	leftGeometryField: "string",
+	/** 左表經度欄位（X）—— 與 leftGeometryField 二選一 */
+	leftLonField: "string",
+	/** 左表緯度欄位（Y）—— 與 leftGeometryField 二選一 */
+	leftLatField: "string",
+	rightGeometryField: "string",
+	rightLonField: "string",
+	rightLatField: "string",
+	/**
+	 * 空間謂詞：INTERSECTS | CONTAINS | WITHIN | TOUCHES | OVERLAPS | CROSSES |
+	 * EQUALS | DWITHIN。只有 DWITHIN 會用到 distance。
+	 */
+	spatialPredicate: "string",
+	/** DWITHIN 的距離門檻，單位由 distanceUnit 決定 */
+	distance: "number",
+	/**
+	 * 距離單位：DEGREES（平面度數，精確）| METERS。
+	 * ⚠ METERS 走 DuckDB 的 ST_Distance_Sphere，而這個 build 的它是
+	 * 「平面度數 × 111194.93」——**不補經度收斂**，所以離開赤道會高估東西向距離。
+	 */
+	distanceUnit: "string",
+	/** 把算出來的距離寫進這個欄位名；空字串 = 不輸出 */
+	distanceColumn: "string",
+
 	// --- SELECT / UNION / SAMPLE -----------------------------------------
 	/** SELECT 要投影的欄位；空陣列 = 全選 */
 	columns: "string[]",

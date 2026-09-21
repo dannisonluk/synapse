@@ -21,6 +21,8 @@ import {
 	safeMatchFunc,
 	matchIsSimilarity,
 	matchThresholdDefault,
+	safeSpatialPredicate,
+	safeDistanceUnit,
 } from "../../../engine/sql";
 import {
 	useUpstreamColumns,
@@ -1152,6 +1154,196 @@ export const AlteryxNode: React.FC<NodeProps<Node<AlteryxNodeData>>> = ({
 
 							<div className="text-[9px] font-mono opacity-50 leading-tight">
 								FIRST_CHAR 只比首字元相同的配對，省掉大部分 O(n×m) 比較；首字元打錯的配對永遠不會命中。
+							</div>
+						</div>
+					);
+				})()}
+
+				{/* 5c. SPATIAL_MATCH 節點介面 */}
+				{nodeType === "SPATIAL_MATCH" && (() => {
+					// 這六個是幾何來源欄位。用聯合型別而不是 string，才能安全地
+					// 動態索引 config / 傳給 updateConfig（TS 會擋下拼錯的鍵）。
+					type GeomKey =
+						| "leftGeometryField"
+						| "leftLonField"
+						| "leftLatField"
+						| "rightGeometryField"
+						| "rightLonField"
+						| "rightLatField";
+					const predicate = safeSpatialPredicate(config.spatialPredicate);
+					const needsDistance = predicate === "DWITHIN";
+					const unit = safeDistanceUnit(config.distanceUnit);
+					// 與編譯器同一條規則：WKT 優先，其次 lon/lat，兩者皆無 = passthrough。
+					const hasGeom = (
+						wkt: unknown,
+						lon: unknown,
+						lat: unknown,
+					) =>
+						Boolean(String(wkt ?? "").trim()) ||
+						(Boolean(String(lon ?? "").trim()) &&
+							Boolean(String(lat ?? "").trim()));
+					const leftOk = hasGeom(
+						config.leftGeometryField,
+						config.leftLonField,
+						config.leftLatField,
+					);
+					const rightOk = hasGeom(
+						config.rightGeometryField,
+						config.rightLonField,
+						config.rightLatField,
+					);
+					const geomInput = (
+						listId: string,
+						fieldKey: GeomKey,
+						options: UpstreamColumn[],
+						placeholder: string,
+					) => (
+						<FieldInput
+							listId={listId}
+							options={options}
+							value={String(config[fieldKey] ?? "")}
+							onValueChange={(v) => updateConfig(fieldKey, v)}
+							placeholder={placeholder}
+							className={`w-full ${inputCls}`}
+						/>
+					);
+					return (
+						<div
+							className={`p-2 rounded border space-y-1 ${
+								isLight
+									? "bg-stone-50/80 border-stone-200/60"
+									: "bg-slate-900/60 border-slate-800"
+							}`}
+						>
+							<div className="text-[9px] font-bold font-mono tracking-wider opacity-60 uppercase">
+								Spatial Match
+							</div>
+
+							{/* 幾何來源每側二選一：WKT 欄位，或經緯度兩欄。
+							    兩條都給時 WKT 優先 —— 它能表達非點幾何。 */}
+							<div className="text-[9px] font-mono opacity-50">
+								左表幾何（WKT 優先；留空則用經緯度）
+							</div>
+							{geomInput(
+								`sp-lwkt-${id}`,
+								"leftGeometryField",
+								upstream.byTable[0] || [],
+								"Left WKT（可留空）",
+							)}
+							<div className="flex space-x-1">
+								{geomInput(
+									`sp-llon-${id}`,
+									"leftLonField",
+									upstream.byTable[0] || [],
+									"Left Lon (X)",
+								)}
+								{geomInput(
+									`sp-llat-${id}`,
+									"leftLatField",
+									upstream.byTable[0] || [],
+									"Left Lat (Y)",
+								)}
+							</div>
+
+							<div className="text-[9px] font-mono opacity-50">
+								右表幾何（WKT 優先；留空則用經緯度）
+							</div>
+							{geomInput(
+								`sp-rwkt-${id}`,
+								"rightGeometryField",
+								upstream.byTable[1] || [],
+								"Right WKT（可留空）",
+							)}
+							<div className="flex space-x-1">
+								{geomInput(
+									`sp-rlon-${id}`,
+									"rightLonField",
+									upstream.byTable[1] || [],
+									"Right Lon (X)",
+								)}
+								{geomInput(
+									`sp-rlat-${id}`,
+									"rightLatField",
+									upstream.byTable[1] || [],
+									"Right Lat (Y)",
+								)}
+							</div>
+
+							{(!leftOk || !rightOk) && (
+								<div className="text-[9px] font-mono text-red-500 leading-tight">
+									{!leftOk && "左表"}
+									{!leftOk && !rightOk && "與"}
+									{!rightOk && "右表"}
+									未指定幾何來源 → 這個節點會直接通過（passthrough），不做任何空間比對
+								</div>
+							)}
+
+							<div className="flex space-x-1">
+								<select
+									value={predicate}
+									onChange={(e) =>
+										updateConfig("spatialPredicate", e.target.value)
+									}
+									title="空間關係；只有 DWITHIN 會用到距離門檻"
+									className={`w-28 ${selectCls}`}
+								>
+									<option value="INTERSECTS">INTERSECTS</option>
+									<option value="CONTAINS">CONTAINS</option>
+									<option value="WITHIN">WITHIN</option>
+									<option value="TOUCHES">TOUCHES</option>
+									<option value="OVERLAPS">OVERLAPS</option>
+									<option value="CROSSES">CROSSES</option>
+									<option value="EQUALS">EQUALS</option>
+									<option value="DWITHIN">DWITHIN</option>
+								</select>
+								<input
+									value={String(config.distance ?? "")}
+									onChange={(e) => updateConfig("distance", e.target.value)}
+									disabled={!needsDistance}
+									title="只有 DWITHIN 會用到距離門檻"
+									placeholder="距離"
+									className={`w-16 ${inputCls} ${
+										needsDistance ? "" : "opacity-40"
+									}`}
+								/>
+								<select
+									value={unit}
+									onChange={(e) =>
+										updateConfig("distanceUnit", e.target.value)
+									}
+									title="距離單位"
+									className={`w-24 ${selectCls}`}
+								>
+									<option value="DEGREES">DEGREES</option>
+									<option value="METERS">METERS</option>
+								</select>
+							</div>
+
+							<div className="flex space-x-1">
+								<select
+									value={config.joinType || "INNER"}
+									onChange={(e) =>
+										updateConfig("joinType", e.target.value)
+									}
+									className={`w-20 ${selectCls}`}
+								>
+									<option value="INNER">INNER</option>
+									<option value="LEFT">LEFT</option>
+								</select>
+								<input
+									value={String(config.distanceColumn ?? "")}
+									onChange={(e) =>
+										updateConfig("distanceColumn", e.target.value)
+									}
+									placeholder="距離欄位（留空則不輸出）"
+									className={`flex-1 ${inputCls}`}
+								/>
+							</div>
+
+							<div className="text-[9px] font-mono opacity-50 leading-tight">
+								CONTAINS 是「左包含右」、WITHIN 是「左落在右之內」，方向相反。
+								{unit === "METERS" &&
+									" METERS 走 ST_Distance_Sphere，這個 build 的它不補經度收斂，離開赤道會高估東西向距離；要精確請用 DEGREES。"}
 							</div>
 						</div>
 					);

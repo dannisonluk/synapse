@@ -13,7 +13,7 @@
 //   - 本檔案不可 import React component（測試會在 Node 直接 import 它）。
 import type { Edge, Node } from "@xyflow/react";
 import { orderUpstreamSources, topologicalSort } from "./scheduler";
-import { compileNodeSelect, resolveSourceTables } from "./astCompiler";
+import { compileNodeSelect, resolveSourceTables, requiredExtensions } from "./astCompiler";
 import { qi } from "./sql";
 
 // ---------------------------------------------------------------------------
@@ -72,6 +72,9 @@ export function exportToSqlCte(
 	const externalSources = new Set<string>();
 	const skipped: string[] = [];
 	const ctes: { id: string; label: string; type: string; body: string }[] = [];
+	// 需要 DuckDB 擴充的節點 → 腳本開頭要補 LOAD。
+	// 不能塞進 WITH 裡面：LOAD 是一條獨立語句，WITH ... SELECT 是一條語句。
+	const extensions = new Set<string>();
 
 	for (const id of order) {
 		const node = byId.get(id);
@@ -87,6 +90,8 @@ export function exportToSqlCte(
 		}
 
 		const upstream = orderUpstreamSources(id, edges);
+
+		for (const ext of requiredExtensions(type)) extensions.add(ext);
 
 		// 有 data.type → 由 config 重新編譯（單一來源）；
 		// 沒有 data.type → 使用者自己寫的 raw SQL 節點，沿用原句
@@ -155,6 +160,13 @@ export function exportToSqlCte(
 			skipped,
 		};
 	}
+
+	// LOAD 必須是獨立語句，所以放在 WITH 之前 —— 塞進 CTE 會是語法錯誤。
+	// 排序只是為了讓同一份工作流每次匯出逐字節相同。
+	for (const ext of [...extensions].sort()) {
+		lines.push(`LOAD ${ext};`);
+	}
+	if (extensions.size > 0) lines.push("");
 
 	lines.push("WITH");
 	ctes.forEach((cte, i) => {

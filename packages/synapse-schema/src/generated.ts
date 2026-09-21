@@ -37,6 +37,7 @@ export const NODE_TYPES = [
 	"FIND_REPLACE",
 	"FUZZY_JOIN",
 	"JOIN",
+	"SPATIAL_MATCH",
 	"UNION",
 	"VIZ_CHART",
 ] as const;
@@ -192,6 +193,19 @@ export const NODE_FIELDS: { readonly [K in NodeType]: readonly FieldSpec[] } = {
 		{ name: "leftKey", kind: "field", label: "左鍵", required: false },
 		{ name: "rightKey", kind: "field", label: "右鍵", required: false },
 	],
+	SPATIAL_MATCH: [
+		{ name: "leftGeometryField", kind: "field", label: "左表 WKT", required: false },
+		{ name: "leftLonField", kind: "field", label: "左表經度", required: false },
+		{ name: "leftLatField", kind: "field", label: "左表緯度", required: false },
+		{ name: "rightGeometryField", kind: "field", label: "右表 WKT", required: false },
+		{ name: "rightLonField", kind: "field", label: "右表經度", required: false },
+		{ name: "rightLatField", kind: "field", label: "右表緯度", required: false },
+		{ name: "spatialPredicate", kind: "enum", label: "空間關係", required: false, values: ["INTERSECTS", "CONTAINS", "WITHIN", "TOUCHES", "OVERLAPS", "CROSSES", "EQUALS", "DWITHIN"] },
+		{ name: "distance", kind: "number", label: "距離門檻", required: false },
+		{ name: "distanceUnit", kind: "enum", label: "距離單位", required: false, values: ["DEGREES", "METERS"] },
+		{ name: "distanceColumn", kind: "text", label: "距離欄位", required: false },
+		{ name: "joinType", kind: "enum", label: "未命中時", required: false, values: ["INNER", "LEFT"] },
+	],
 	UNION: [
 		{ name: "unionMode", kind: "enum", label: "對齊方式", required: false, values: ["BY_NAME", "POSITION"] },
 	],
@@ -227,6 +241,7 @@ export const NODE_META: { readonly [K in NodeType]: NodeMeta } = {
 	FIND_REPLACE: { label: "Find Replace", category: "Join", description: "用查找表把某欄的值替換掉，只帶回一個值欄位（不像 Join 帶回全部欄位）。", inputs: 2 },
 	FUZZY_JOIN: { label: "Fuzzy Join", category: "Join", description: "用字串相似度（而非完全相等）合併兩個輸入，可選擇輸出相似度分數。", inputs: 2 },
 	JOIN: { label: "Join", category: "Join", description: "依鍵合併兩個輸入，保留兩邊全部欄位。", inputs: 2 },
+	SPATIAL_MATCH: { label: "Spatial Match", category: "Join", description: "用空間關係（相交 / 包含 / 距離）合併兩個輸入。幾何可來自 WKT 欄位或經緯度兩欄。", inputs: 2 },
 	UNION: { label: "Union", category: "Join", description: "把 N 個輸入上下疊起來（預設依欄位名對齊）。", inputs: -1 },
 	VIZ_CHART: { label: "Chart", category: "BI", description: "把上游結果畫成圖表（不產生輸出表）。", inputs: 1 },
 };

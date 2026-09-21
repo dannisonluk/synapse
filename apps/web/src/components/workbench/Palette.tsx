@@ -25,6 +25,7 @@ import {
 	Columns3,
 	Replace,
 	Fingerprint,
+	MapPin,
 	type LucideIcon,
 } from "lucide-react";
 import { useTheme } from "../../theme/ThemeContext";
@@ -70,6 +71,7 @@ const ICONS: Record<string, LucideIcon> = {
 	Replace,
 	PieChart,
 	Fingerprint,
+	MapPin,
 };
 
 /** 供驗證腳本斷言「目錄用到的 icon 名稱這裡都有」 */

@@ -726,6 +726,82 @@ export const NODE_CATALOG: Record<AlteryxNodeType, NodeSpec> = {
 		],
 	},
 
+	SPATIAL_MATCH: {
+		type: "SPATIAL_MATCH",
+		label: "Spatial Match",
+		category: "Join",
+		description: "用空間關係（相交 / 包含 / 距離）合併兩個輸入。幾何可來自 WKT 欄位或經緯度兩欄。",
+		whenToUse:
+			"使用者說「空間比對 / 這個點落在哪個區 / 方圓幾公尺內 / 地理圍欄 / 門店與行政區對照 / spatial join」時。" +
+			"只是要比對文字請用 Fuzzy Join；兩邊的鍵完全相等請用 Join。",
+		inputs: 2,
+		nodeType: "alteryxNode",
+		icon: "MapPin",
+		color: "text-emerald-500",
+		defaults: {
+			spatialPredicate: "INTERSECTS",
+			joinType: "INNER",
+			distance: 0.01,
+			distanceUnit: "DEGREES",
+			leftLonField: "lon",
+			leftLatField: "lat",
+			rightLonField: "lon",
+			rightLatField: "lat",
+		},
+		fields: [
+			{
+				name: "leftGeometryField",
+				kind: "field",
+				label: "左表 WKT",
+				hint: "WKT 幾何欄位（例如 POINT(114.1 22.3)）。留空則改用下面的經緯度兩欄。WKT 可以是非點幾何。",
+			},
+			{ name: "leftLonField", kind: "field", label: "左表經度", hint: "X 座標欄位。與 WKT 欄位二選一。" },
+			{ name: "leftLatField", kind: "field", label: "左表緯度", hint: "Y 座標欄位。與 WKT 欄位二選一。" },
+			{ name: "rightGeometryField", kind: "field", label: "右表 WKT" },
+			{ name: "rightLonField", kind: "field", label: "右表經度" },
+			{ name: "rightLatField", kind: "field", label: "右表緯度" },
+			{
+				name: "spatialPredicate",
+				kind: "enum",
+				label: "空間關係",
+				values: ["INTERSECTS", "CONTAINS", "WITHIN", "TOUCHES", "OVERLAPS", "CROSSES", "EQUALS", "DWITHIN"],
+				default: "INTERSECTS",
+				hint: "CONTAINS 是「左包含右」、WITHIN 是「左落在右之內」，方向相反。只有 DWITHIN 會用到距離門檻。",
+			},
+			{
+				name: "distance",
+				kind: "number",
+				label: "距離門檻",
+				default: 0.01,
+				hint: "只有 spatialPredicate = DWITHIN 時有意義。單位由下面的 distanceUnit 決定。",
+			},
+			{
+				name: "distanceUnit",
+				kind: "enum",
+				label: "距離單位",
+				values: ["DEGREES", "METERS"],
+				default: "DEGREES",
+				hint:
+					"DEGREES 是平面度數，精確。METERS 走 ST_Distance_Sphere，但這個 build 的它是「平面度數 × 111194.93」、" +
+					"不補經度收斂，所以離開赤道會高估東西向距離（香港約 8%、lat 60 約一倍）。要精確請用 DEGREES。",
+			},
+			{
+				name: "distanceColumn",
+				kind: "text",
+				label: "距離欄位",
+				hint: "把配對的距離寫進這個欄位名；留空則不輸出。",
+			},
+			{
+				name: "joinType",
+				kind: "enum",
+				label: "未命中時",
+				values: ["INNER", "LEFT"],
+				default: "INNER",
+				hint: "INNER 只留命中的配對；LEFT 保留左表全部列，未命中的右表欄位為 NULL。",
+			},
+		],
+	},
+
 	UNION: {
 		type: "UNION",
 		label: "Union",

@@ -125,6 +125,74 @@ export function safeFuzzyJoinType(t: unknown, fallback = "INNER"): string {
 }
 
 /**
+ * SPATIAL_MATCH 的二元空間謂詞白名單 → DuckDB 函式名。
+ *
+ * 這裡**只有二元謂詞**。DWITHIN 不在這張表裡：它需要一個距離參數，而且距離的
+ * 單位有兩種（度 / 公尺），編譯器是把它寫成 `<距離表達式> <= <門檻>` 而不是呼叫
+ * ST_DWithin —— 這樣「篩選用的距離」與「輸出欄位的距離」保證是同一個表達式，
+ * 不可能出現「門檻換了單位、輸出沒換」這種半套。詳見 astCompiler 的 SPATIAL_MATCH。
+ */
+const SPATIAL_PREDICATES: Record<string, string> = {
+	INTERSECTS: "ST_Intersects",
+	CONTAINS: "ST_Contains",
+	WITHIN: "ST_Within",
+	TOUCHES: "ST_Touches",
+	OVERLAPS: "ST_Overlaps",
+	CROSSES: "ST_Crosses",
+	EQUALS: "ST_Equals",
+};
+
+/** DWITHIN 是唯一吃距離參數的謂詞，所以另外列舉。 */
+export const SPATIAL_DWITHIN = "DWITHIN";
+
+export function safeSpatialPredicate(p: unknown, fallback = "INTERSECTS"): string {
+	const normalized = String(p ?? "").trim().toUpperCase().replace(/\s+/g, "");
+	return normalized === SPATIAL_DWITHIN || normalized in SPATIAL_PREDICATES
+		? normalized
+		: fallback;
+}
+
+/** 二元謂詞 → DuckDB 函式名。呼叫前請先過 safeSpatialPredicate()。 */
+export function duckdbSpatialFn(predicate: string): string {
+	return SPATIAL_PREDICATES[predicate] ?? SPATIAL_PREDICATES.INTERSECTS;
+}
+
+/**
+ * 距離單位白名單。
+ *   DEGREES → ST_Distance / ST_DWithin 的平面度數
+ *   METERS  → ST_Distance_Sphere
+ *
+ * ⚠ 這個 build 的 ST_Distance_Sphere 實測就是「平面度數 × 111194.92664455874」：
+ *   同一段 1 度經差在赤道與 lat 60 量到完全一樣的值（比值 1.0），
+ *   也就是**沒有**經度收斂修正。所以 METERS 在離開赤道後會高估東西向距離
+ *   （lat 60 約高估一倍，香港 lat 22.3 約高估 8%）。
+ *   要精確就選 DEGREES。這個數字不是推論，是 scripts/verify_duckdb_wasm.mjs 量到的。
+ */
+const ALLOWED_DISTANCE_UNITS = new Set(["DEGREES", "METERS"]);
+
+export function safeDistanceUnit(u: unknown, fallback = "DEGREES"): string {
+	const normalized = String(u ?? "").trim().toUpperCase();
+	return ALLOWED_DISTANCE_UNITS.has(normalized) ? normalized : fallback;
+}
+
+/** 每度對應的公尺數（DuckDB ST_Distance_Sphere 在這個 build 用的常數） */
+export const METERS_PER_DEGREE = 111194.92664455874;
+
+/** SPATIAL_MATCH 的 JOIN type 白名單；與 UI 表單一致 */
+const ALLOWED_SPATIAL_JOIN_TYPES = new Set(["INNER", "LEFT"]);
+
+export function safeSpatialJoinType(t: unknown, fallback = "INNER"): string {
+	const normalized = String(t ?? "").trim().toUpperCase().replace(/\s+/g, " ");
+	return ALLOWED_SPATIAL_JOIN_TYPES.has(normalized) ? normalized : fallback;
+}
+
+/** 距離欄位名；空字串 = 不輸出 */
+export function safeDistanceColumn(value: unknown, fallback = ""): string {
+	const s = String(value ?? "").trim();
+	return s || fallback;
+}
+
+/**
  * UNION 的欄位對齊方式。
  *   BY_NAME  → `UNION ALL BY NAME`：按欄位名對齊，缺欄位補 NULL（Alteryx 的 Union 語意）
  *   POSITION → `UNION ALL`：按位置對齊
