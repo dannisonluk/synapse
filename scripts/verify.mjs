@@ -1475,6 +1475,145 @@ section("8. exportPolars.ts — Python / Polars 腳本匯出");
 			// 第一個 list 是 d1、第二個是 d2（上面刻意把兩次 repr 接在一起印）。
 			check("TEXT_TO_COLUMNS REGEX handles a multi-hit pattern",
 				t2cOut.includes("T2C_D=['a , b', 'a', 'NOPE'][None, 'b', None]"), true);
+
+			// --- FUZZY_JOIN：兩個引擎必須給出**同一個**相似度分數 ---
+			// 重點不是「有沒有跑起來」，而是「兩邊算的是不是同一個指標」。
+			// Polars 1.44 完全沒有字串相似度函數（整個 str 命名空間都沒有），所以匯出時
+			// 內嵌一份純 Python 的 Jaro-Winkler。那份實作與 DuckDB 內建函式是不是同一個
+			// 數字，只有真的跑起來比對才算證明 —— difflib.SequenceMatcher 就是個現成的
+			// 反例：('martha','marhta') 它給 0.8333，Jaro-Winkler 給 0.9611，是不同指標。
+			//
+			// 實測踩到的兩個坑（都已修，這裡把值釘住）：
+			//   jaro_winkler('','')             DuckDB 回 0.0，不是直覺的 1.0
+			//   damerau_levenshtein('ca','abc') DuckDB 回 2（unrestricted），教科書 OSA 是 3
+			const fzDir = mkdtempSync(join(tmpdir(), "synapse-fz-run-"));
+			writeFileSync(join(fzDir, "fzleft.csv"), "id,name\n1,martha\n2,kitten\n", "utf8");
+			writeFileSync(join(fzDir, "fzright.csv"), "code,name\n10,marhta\n11,sitting\n", "utf8");
+			const fzChain = polars.exportToPolars([
+				mk("node_l", { label: "L", type: "INPUT_DUCKDB", config: { fileName: "fzleft.csv" } }),
+				mk("node_r", { label: "R", type: "INPUT_DUCKDB", config: { fileName: "fzright.csv" } }),
+				mk("node_f", { label: "F", type: "FUZZY_JOIN", config: {
+					leftKey: "name", rightKey: "name", matchFunc: "JARO_WINKLER",
+					threshold: 0.85, joinType: "INNER", scoreColumn: "score" } }),
+			], [
+				{ id: "f1", source: "node_l", target: "node_f" },
+				{ id: "f2", source: "node_r", target: "node_f" },
+			]);
+			check("the FUZZY_JOIN chain needs no manual review", fzChain.needsReview, []);
+			has("FUZZY_JOIN injects the pure-Python fuzzy helpers",
+				fzChain.script, "def _synapse_jaro_winkler");
+			has("FUZZY_JOIN renames the right key to <key>_1 to match DuckDB",
+				fzChain.script, 'rename({"__fz_rk": "name_1"})');
+
+			const fzScript = fzChain.script + "\n" + [
+				'print("FZ_NAMES=" + repr(sorted(node_f.columns)))',
+				'print("FZ_SCORE=" + repr(node_f["score"].to_list()))',
+				'print("FZ_R=" + repr(node_f["name_1"].to_list()))',
+				"",
+			].join("\n");
+			const fzPath = join(fzDir, "fz.py");
+			writeFileSync(fzPath, fzScript, "utf8");
+			let fzOut = null;
+			try {
+				fzOut = execFileSync(polarsPy, [fzPath], {
+					cwd: fzDir,
+					encoding: "utf8",
+					stdio: ["ignore", "pipe", "pipe"],
+					env: { ...process.env, POLARS_SKIP_CPU_CHECK: "1" },
+				});
+			} catch (err) {
+				fzOut = String(err.stdout || "") + String(err.stderr || err.message);
+			}
+			check("the generated FUZZY_JOIN script actually runs",
+				fzOut.includes("FZ_NAMES=['code', 'id', 'name', 'name_1', 'score']"), true);
+			// 這個常數與 section 7 在 duckdb-wasm 上量到的 jaro_winkler_similarity 相同。
+			// 兩邊各釘一次，才擋得住「只改了一邊」。
+			check("the exported FUZZY_JOIN reproduces DuckDB's Jaro-Winkler score",
+				fzOut.includes("FZ_SCORE=[0.9611111111111111]"), true);
+			check("the exported FUZZY_JOIN keeps the matched right key",
+				fzOut.includes("FZ_R=['marhta']"), true);
+
+			// LEFT 是匯出器裡最複雜的一段：cross join + 篩選會把未命中的左表列直接丟掉
+			// （語意變成 INNER），所以匯出時另外用 anti join + diagonal_relaxed 補回來。
+			// 這正是那種「看起來對、跑起來少幾列」的地方，非跑不可。
+			// DuckDB 那邊同一組設定在 verify_duckdb_wasm.mjs 的 11g 也釘了。
+			const fzLeftChain = polars.exportToPolars([
+				mk("node_l", { label: "L", type: "INPUT_DUCKDB", config: { fileName: "fzleft.csv" } }),
+				mk("node_r", { label: "R", type: "INPUT_DUCKDB", config: { fileName: "fzright.csv" } }),
+				mk("node_f", { label: "F", type: "FUZZY_JOIN", config: {
+					leftKey: "name", rightKey: "name", matchFunc: "JARO_WINKLER",
+					threshold: 0.85, joinType: "LEFT", scoreColumn: "score" } }),
+			], [
+				{ id: "f1", source: "node_l", target: "node_f" },
+				{ id: "f2", source: "node_r", target: "node_f" },
+			]);
+			check("the FUZZY_JOIN LEFT chain needs no manual review", fzLeftChain.needsReview, []);
+			const fzLeftScript = fzLeftChain.script + "\n" + [
+				'print("FZL=" + repr(sorted(zip(node_f["id"].to_list(), node_f["name_1"].to_list()))))',
+				"",
+			].join("\n");
+			const fzLeftPath = join(fzDir, "fz_left.py");
+			writeFileSync(fzLeftPath, fzLeftScript, "utf8");
+			let fzLeftOut = null;
+			try {
+				fzLeftOut = execFileSync(polarsPy, [fzLeftPath], {
+					cwd: fzDir,
+					encoding: "utf8",
+					stdio: ["ignore", "pipe", "pipe"],
+					env: { ...process.env, POLARS_SKIP_CPU_CHECK: "1" },
+				});
+			} catch (err) {
+				fzLeftOut = String(err.stdout || "") + String(err.stderr || err.message);
+			}
+			check("FUZZY_JOIN LEFT keeps the unmatched left rows (null right key)",
+				fzLeftOut.includes("FZL=[(1, 'marhta'), (2, None)]"), true);
+
+			// 兩個 FUZZY_JOIN 只該注入一次輔助函式（Set 去重）。重複定義在 Python 裡
+			// 不會報錯，所以這種 bug 不會自己浮出來 —— 只會讓腳本默默變長。
+			const fzTwo = polars.exportToPolars([
+				mk("node_a", { label: "A", type: "INPUT_DUCKDB", config: { fileName: "fzleft.csv" } }),
+				mk("node_b", { label: "B", type: "INPUT_DUCKDB", config: { fileName: "fzright.csv" } }),
+				mk("node_c", { label: "C", type: "FUZZY_JOIN", config: {
+					leftKey: "name", rightKey: "name", matchFunc: "JARO_WINKLER", threshold: 0.85 } }),
+				mk("node_d", { label: "D", type: "FUZZY_JOIN", config: {
+					leftKey: "name", rightKey: "name_1", matchFunc: "LEVENSHTEIN", threshold: 2 } }),
+			], [
+				{ id: "g1", source: "node_a", target: "node_c" },
+				{ id: "g2", source: "node_b", target: "node_c" },
+				{ id: "g3", source: "node_c", target: "node_d" },
+				{ id: "g4", source: "node_b", target: "node_d" },
+			]);
+			check("two FUZZY_JOIN nodes inject the helper block exactly once",
+				fzTwo.script.split("def _synapse_jaro_winkler").length - 1, 1);
+
+			// EXACT 是退化情況：必須走原生等值 join（hash join），不是 cross join。
+			// 用 cross join 再逐對算分是 O(n*m)，在精確比對上白白多乘一個 n。
+			const fzExact = one("FUZZY_JOIN", {
+				leftKey: "name", rightKey: "name", matchFunc: "EXACT", joinType: "INNER" });
+			has("FUZZY_JOIN EXACT uses a native equi-join",
+				fzExact, 'on="__fz_lk", how="inner"');
+			check("FUZZY_JOIN EXACT never emits a cross join",
+				fzExact.includes('how="cross"'), false);
+
+			// 表單只提供 INNER / LEFT。硬塞 FULL OUTER 時，兩個引擎必須一起退回 INNER，
+			// 而不是 DuckDB 做 FULL JOIN、Polars 給 INNER 結果 —— 那是無聲的不一致。
+			//
+			// 這裡不能用「腳本裡有 how="inner"」來斷言：模糊比對走的是 cross join + 篩選，
+			// INNER 的語意來自那個篩選本身，腳本裡根本不會出現 how="inner"。
+			// 可觀察的證據是「產出的**程式碼**與 joinType=INNER 逐字相同」，
+			// 差別只應該在翻譯備註那幾行註解（exportToPolars 會把 note 寫進腳本）。
+			const fzCfg = {
+				leftKey: "name", rightKey: "name", matchFunc: "JARO_WINKLER", threshold: 0.85 };
+			const stripComments = (s) =>
+				s.split("\n").filter((l) => !l.trimStart().startsWith("#")).join("\n");
+			const fzInner = oneRes("FUZZY_JOIN", { ...fzCfg, joinType: "INNER" });
+			const fzFull = oneRes("FUZZY_JOIN", { ...fzCfg, joinType: "FULL OUTER" });
+			check("an out-of-range FUZZY_JOIN joinType compiles to the same code as INNER",
+				stripComments(fzFull.script) === stripComments(fzInner.script), true);
+			has("...and says so in a note instead of silently changing the join",
+				fzFull.script, "FULL OUTER");
+			check("FUZZY_JOIN never emits a full join",
+				fzFull.script.includes('how="full"'), false);
 		}
 	}
 }
@@ -1650,6 +1789,18 @@ section("9. persistence.ts — 自動存檔（可注入 storage，因此能在 N
 	for (const t of ["UNIQUE", "DATA_CLEANSING", "RANK", "RUNNING_TOTAL", "CROSS_TAB", "TRANSPOSE", "REGEX", "MULTI_FIELD_FORMULA"]) {
 		check(`the keyword fallback understands ${t}`, fallbackTypes.includes(t), true);
 	}
+
+	// 10e. fallback 只能收單輸入節點 —— 這是設計限制，不是漏掉。
+	// _fallback_ast_patch 把每一步都接在上一步的左埠（targetHandle: "left"），
+	// 是一條純線性鏈。雙輸入節點（JOIN / APPEND_FIELDS / FIND_REPLACE / FUZZY_JOIN）
+	// 在這裡只會接到一個上游，另一個會落到 raw_data 佔位 —— 產出一條跑不動的 pipeline。
+	//
+	// 所以 FUZZY_JOIN 沒有出現在 fallback 裡是刻意的。有人加了一個多輸入節點
+	// 進來就會紅燈，逼他先想清楚第二個輸入要從哪來。
+	const fallbackMultiInput = fallbackTypes.filter(
+		(t) => (catalog.NODE_CATALOG[t]?.inputs ?? 1) > 1);
+	check("the keyword fallback uses only single-input node types (the chain is linear)",
+		fallbackMultiInput, []);
 }
 
 // ===========================================================================

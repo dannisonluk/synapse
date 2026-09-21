@@ -945,6 +945,99 @@ export async function runDuckDbWasmChecks(root, loadTs, fallbackPipelines = []) 
 		schema("node_mff_num"), ["name", "code", "amount"]);
 
 	// =====================================================================
+	// 11g. FUZZY_JOIN：模糊比對
+	// =====================================================================
+	// Jaro-Winkler / Levenshtein / Damerau 都是 duckdb-wasm **內建**的，不需要
+	// INSTALL / LOAD 任何 extension（在出貨的 wasm 上實測）。這點值得釘住，因為
+	// 「要不要載 extension」正是瀏覽器裡最容易踩雷的地方 —— wasm 版沒有網路，
+	// INSTALL 會變成 no-op，真正能用只因為它是靜態連結進去的。
+	//
+	// 這幾個常數在這裡釘一次，scripts/verify.mjs 的 FUZZY_JOIN 執行斷言再釘一次
+	// 同一個分數：Polars 沒有對應函式，匯出時是內嵌一份純 Python 實作，
+	// 兩邊各釘一次才擋得住「只改了一邊」。
+	add("the shipped wasm has jaro_winkler_similarity built in",
+		q("SELECT jaro_winkler_similarity('martha','marhta');"), [["0.9611111111111111"]]);
+	add("the shipped wasm has levenshtein built in",
+		q("SELECT levenshtein('kitten','sitting');"), [["3"]]);
+	// DuckDB 的 damerau_levenshtein 是 **unrestricted** 版本，不是教科書的 OSA：
+	// 'ca' vs 'abc' 它回 2，OSA 會回 3。內嵌的 Python 實作照這個（已照）。
+	add("DuckDB's damerau_levenshtein is the unrestricted variant, not OSA",
+		q("SELECT damerau_levenshtein('ca','abc');"), [["2"]]);
+	// 空字串：DuckDB 回 0.0，不是直覺的 1.0。內嵌實作照這個（已照）。
+	// 這裡的預期值是 "0" 而不是 "0.0"：harness 的 q() 把每個值丟給 String()，
+	// 而 String(0) === "0"。這是 harness 的呈現方式，不是引擎的語意差異。
+	add("jaro_winkler_similarity of two empty strings is 0.0, not 1.0",
+		q("SELECT jaro_winkler_similarity('','');"), [["0"]]);
+	// 三個函式都區分大小寫 → 「忽略大小寫」只能靠 LOWER()，不能指望函式本身。
+	// 這正是 Polars 那邊 lower=True 與 SQL 那邊 lower() 的依據。
+	add("the fuzzy functions are case-sensitive",
+		q("SELECT jaro_winkler_similarity('hello','HELLO'), levenshtein('hello','HELLO');"),
+		[["0", "5"]]);
+
+	conn.query(`CREATE OR REPLACE TABLE fz_left AS SELECT * FROM (VALUES
+		(1, 'martha'), (2, 'kitten'), (3, 'xyz'), (4, 'Smith')) AS t(id, name);`);
+	conn.query(`CREATE OR REPLACE TABLE fz_right AS SELECT * FROM (VALUES
+		(10, 'marhta'), (11, 'sitting'), (12, 'SMITH')) AS t(code, name);`);
+
+	const fzCfg = (over = {}) => ({
+		leftKey: "name", rightKey: "name", matchFunc: "JARO_WINKLER",
+		threshold: 0.85, joinType: "INNER", scoreColumn: "score", ...over });
+	const fzRun = (id, over) => conn.query(
+		compiler.generateSqlFromConfig(id, "FUZZY_JOIN", fzCfg(over), ["fz_left", "fz_right"]));
+
+	// 兩側鍵同名（name / name）是最常見、也最容易寫錯的情況：裸欄位名會讓 DuckDB
+	// 報 "Ambiguous reference to column name"。所以這條「跑得動」本身就是對
+	// a. / b. 表別名的斷言 —— 字串比對看不出這件事，只有真的執行才會炸。
+	fzRun("fz_inner");
+	add("FUZZY_JOIN INNER matches only the near pair",
+		q("SELECT name, name_1 FROM fz_inner;"), [["martha", "marhta"]]);
+	add("FUZZY_JOIN keeps both key columns, like JOIN does",
+		schema("fz_inner"), ["id", "name", "code", "name_1", "score"]);
+	add("FUZZY_JOIN exposes the Jaro-Winkler score",
+		q("SELECT score FROM fz_inner;"), [["0.9611111111111111"]]);
+
+	// 距離型指標的方向必須是 <=（越小越像）。寫成 >= 會讓「最不像的」全部命中，
+	// 而且不會報任何錯 —— 這種 bug 只有看資料才發現得了。
+	fzRun("fz_lev", { matchFunc: "LEVENSHTEIN", threshold: 2 });
+	add("FUZZY_JOIN compares an edit distance with <=, not >=",
+		q("SELECT name, name_1 FROM fz_lev;"), [["martha", "marhta"]]);
+
+	// 忽略大小寫要靠 LOWER()：函式本身區分大小寫，Smith/SMITH 才會變成 1.0。
+	fzRun("fz_ci", { caseInsensitive: true });
+	add("FUZZY_JOIN case-insensitive also matches the differing-case pair",
+		q("SELECT name, name_1 FROM fz_ci ORDER BY id;"),
+		[["martha", "marhta"], ["Smith", "SMITH"]]);
+	add("...and scores an exact case-folded match as 1",
+		q("SELECT score FROM fz_ci WHERE id = 4;"), [["1"]]);
+
+	// LEFT：未命中的左表列必須留著（右表欄位為 NULL）
+	fzRun("fz_lj", { joinType: "LEFT" });
+	add("FUZZY_JOIN LEFT keeps unmatched left rows",
+		q("SELECT id, name_1 FROM fz_lj ORDER BY id;"),
+		[["1", "marhta"], ["2", "null"], ["3", "null"], ["4", "null"]]);
+
+	// EXACT 是退化情況：只比相等，而且不產生相似度分欄（與匯出器一致）
+	fzRun("fz_exact", { matchFunc: "EXACT" });
+	add("FUZZY_JOIN EXACT matches only equal strings",
+		q("SELECT name FROM fz_exact;"), []);
+	add("FUZZY_JOIN EXACT adds no score column even if one was requested",
+		schema("fz_exact"), ["id", "name", "code", "name_1"]);
+
+	// 沒設鍵 → passthrough，不猜鍵（猜錯會變成笛卡兒積）
+	conn.query(compiler.generateSqlFromConfig("fz_nokeys", "FUZZY_JOIN",
+		{ leftKey: "", rightKey: "" }, ["fz_left", "fz_right"]));
+	add("FUZZY_JOIN with no keys is a passthrough, not a guessed join",
+		q("SELECT id FROM fz_nokeys ORDER BY id;"), [["1"], ["2"], ["3"], ["4"]]);
+	add("...and adds no right-hand columns",
+		schema("fz_nokeys"), ["id", "name"]);
+
+	// 表單只提供 INNER / LEFT。硬塞 FULL OUTER 必須退回 INNER，否則 DuckDB 做
+	// FULL JOIN 而 Polars 只給 INNER —— 兩個引擎無聲地不一致。
+	fzRun("fz_full", { joinType: "FULL OUTER" });
+	add("an out-of-range FUZZY_JOIN joinType is coerced to INNER on the SQL side",
+		q("SELECT name FROM fz_full;"), [["martha"]]);
+
+	// =====================================================================
 	// 12. 視窗 / 序列組：MULTI_ROW_FORMULA / RUNNING_TOTAL / RANK
 	// =====================================================================
 	conn.query(
@@ -1218,7 +1311,7 @@ export async function runDuckDbWasmChecks(root, loadTs, fallbackPipelines = []) 
 	//      （inputs >= 2 的節點必須拿得到兩個上游）
 	const twoInput = catalogTypes.filter((t) => catalog.NODE_CATALOG[t].inputs === 2);
 	add("catalog declares exactly the dual-input nodes", twoInput.sort(),
-		["APPEND_FIELDS", "FIND_REPLACE", "JOIN"]);
+		["APPEND_FIELDS", "FIND_REPLACE", "FUZZY_JOIN", "JOIN"]);
 	for (const t of twoInput) {
 		add(`${t} resolves two upstream tables`,
 			compiler.resolveSourceTables("x", t, [
