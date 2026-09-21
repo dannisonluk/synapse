@@ -14,6 +14,7 @@ import {
 	safeOp,
 	safeFunc,
 	safeJoinType,
+	safeFuzzyJoinType,
 	safeExpr,
 	safeUnionMode,
 	safeSampleMode,
@@ -27,9 +28,18 @@ import {
 	hasCurrentField,
 	applyCurrentField,
 	safeSplitMode,
+	safeMatchFunc,
+	matchIsSimilarity,
+	matchThreshold,
+	duckdbMatchFn,
+	safePrefilter,
+	safeScoreColumn,
 	intLit,
 } from "./sql";
 import type { Edge } from "@xyflow/react";
+// 節點的輸入埠數量（arity）只有目錄一份真相，這裡不再自己抄一份名單。
+import { NODE_CATALOG } from "./nodeCatalog";
+import type { AlteryxNodeType } from "../types/workbench";
 // 節點 config 的形狀宣告在 types/nodeConfig.ts —— 那是唯一一份。
 // 本檔以前手抄了一份 NodeConfig（與另外兩份互不檢查），現已收斂成別名。
 // 用 import type 是刻意的：本檔會被 Web Worker import，型別 import 會被完全抹除。
@@ -322,8 +332,11 @@ export function resolveSourceTables(
 		branchTableName(e.source, e.sourceHandle),
 	);
 
-	if (nodeType === "JOIN" || nodeType === "APPEND_FIELDS" || nodeType === "FIND_REPLACE") {
-		// 三個都是 left / right 雙輸入；缺表時以 raw_data 補位
+	// 雙輸入（left / right）節點由目錄的 arity 決定，不在這裡另抄一份名單。
+	// 抄一份的下場就是新增節點時忘了改 —— 而症狀是「第二個輸入被靜默丟掉」，
+	// 畫布上看起來完全正常。FUZZY_JOIN 就是這樣漏掉過一次。
+	const spec = NODE_CATALOG[nodeType as AlteryxNodeType];
+	if (spec?.inputs === 2) {
 		const left = tables[0] || "raw_data";
 		const right = tables[1] || "raw_data";
 		return [left, right];
@@ -420,6 +433,57 @@ export function compileNodeSelect(
 			// 同名欄位由 DuckDB 自動加序號後綴（id → id_1）——
 			// 已對 duckdb-wasm 1.32.0（DuckDB v1.4.3）實測，不會報錯。
 			return `SELECT a.*, b.* FROM ${qi(leftTable)} a ${joinType} JOIN ${qi(rightTable)} b ON a.${qi(leftKey)} = b.${qi(rightKey)}`;
+		}
+
+		case "FUZZY_JOIN": {
+			const leftTable = upstreamNodeIds[0] || "raw_data";
+			const rightTable = upstreamNodeIds[1] || "raw_data";
+			const leftKey = String(config.leftKey ?? "").trim();
+			const rightKey = String(config.rightKey ?? "").trim();
+
+			// 沒有鍵就無從比對。退回左表的 passthrough 而不是猜一個鍵 ——
+			// 猜錯會產生一個「跑得動但完全錯」的笛卡兒積。
+			if (!leftKey || !rightKey) {
+				return `SELECT * FROM ${qi(leftTable)}`;
+			}
+
+			// 忽略大小寫：兩個引擎的相似度函數都區分大小寫（實測
+			// jaro_winkler_similarity('hello','HELLO') = 0.0），所以只能先 LOWER 兩邊。
+			//
+			// 一定要加表別名 a. / b.：左右鍵同名（最常見的情況，兩邊都叫 name）
+			// 時裸欄位名會讓 DuckDB 直接報 "Ambiguous reference to column name"，
+			// 而 `SELECT a.*, b.*` 這個寫法本身是合法的 —— 錯只錯在 ON 子句。
+			const ci = config.caseInsensitive === true;
+			const lExpr = ci ? `lower(a.${qi(leftKey)})` : `a.${qi(leftKey)}`;
+			const rExpr = ci ? `lower(b.${qi(rightKey)})` : `b.${qi(rightKey)}`;
+
+			const fn = safeMatchFunc(config.matchFunc);
+			let condition: string;
+			if (fn === "EXACT") {
+				condition = `${lExpr} = ${rExpr}`;
+			} else {
+				// 方向：相似度是下限（>=），編輯距離是上限（<=）。
+				// 這個方向不能憑感覺寫 —— 寫反的話「越像越不被選中」，而且 SQL 合法。
+				const op = matchIsSimilarity(fn) ? ">=" : "<=";
+				const threshold = matchThreshold(config.threshold, fn);
+				condition = `${duckdbMatchFn(fn)}(${lExpr}, ${rExpr}) ${op} ${threshold}`;
+			}
+
+			// 候選縮減：把條件接在原本的相似度條件前面。放在 ON 裡（而不是 WHERE）
+			// 是刻意的 —— LEFT JOIN 下 WHERE 會把未命中的列也濾掉，語意就變成 INNER。
+			if (safePrefilter(config.prefilter) === "FIRST_CHAR") {
+				condition = `substr(${lExpr}, 1, 1) = substr(${rExpr}, 1, 1) AND ${condition}`;
+			}
+
+			const joinType = safeFuzzyJoinType(config.joinType, "INNER");
+			const score = safeScoreColumn(config.scoreColumn);
+			const scoreCol =
+				score && fn !== "EXACT"
+					? `, ${duckdbMatchFn(fn)}(${lExpr}, ${rExpr}) AS ${qi(score)}`
+					: "";
+
+			// 保留左右兩表全部欄位（與 JOIN 一致）；同名欄位由 DuckDB 自動加序號後綴。
+			return `SELECT a.*, b.*${scoreCol} FROM ${qi(leftTable)} a ${joinType} JOIN ${qi(rightTable)} b ON ${condition}`;
 		}
 
 		case "SORT": {

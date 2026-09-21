@@ -107,6 +107,24 @@ export function safeJoinType(t: unknown, fallback = "INNER"): string {
 }
 
 /**
+ * FUZZY_JOIN 專用的 JOIN type 白名單。
+ *
+ * 為什麼要獨立一份：Polars 沒有字串相似度函數，模糊比對是用 cross join + 逐對算分
+ * 表達的，只有 INNER / LEFT 有對應的實作（LEFT 靠 anti join 補回未命中的左表列）。
+ * 若這裡沿用 safeJoinType，payload 寫 `FULL OUTER` 時 DuckDB 會真的做 FULL JOIN，
+ * 而 Polars 只會給出 INNER 的結果 —— 兩個引擎無聲地不一致。
+ *
+ * 與 UI 表單一致（表單只提供 INNER / LEFT）。超出範圍一律退回 fallback，
+ * 由呼叫端記錄一則 note，讓「被改寫過」這件事是可見的。
+ */
+const ALLOWED_FUZZY_JOIN_TYPES = new Set(["INNER", "LEFT"]);
+
+export function safeFuzzyJoinType(t: unknown, fallback = "INNER"): string {
+	const normalized = String(t ?? "").trim().toUpperCase().replace(/\s+/g, " ");
+	return ALLOWED_FUZZY_JOIN_TYPES.has(normalized) ? normalized : fallback;
+}
+
+/**
  * UNION 的欄位對齊方式。
  *   BY_NAME  → `UNION ALL BY NAME`：按欄位名對齊，缺欄位補 NULL（Alteryx 的 Union 語意）
  *   POSITION → `UNION ALL`：按位置對齊
@@ -216,6 +234,101 @@ const ALLOWED_SPLIT_MODES = new Set(["SEPARATOR", "REGEX"]);
 export function safeSplitMode(m: unknown, fallback = "SEPARATOR"): string {
 	const normalized = String(m ?? "").trim().toUpperCase();
 	return ALLOWED_SPLIT_MODES.has(normalized) ? normalized : fallback;
+}
+
+/**
+ * FUZZY_JOIN 的比對函數白名單。
+ *
+ * 「方向」是這裡最重要的一件事，也是這個工具最容易靜默出錯的地方：
+ *   JARO_WINKLER         相似度 0..1，**越大越像** → 門檻是下限（>=）
+ *   LEVENSHTEIN          編輯距離整數，**越小越像** → 門檻是上限（<=）
+ *   DAMERAU_LEVENSHTEIN  同上，但允許相鄰字元互換
+ *   EXACT                完全相等，門檻無意義
+ *
+ * 把方向收斂成 matchIsSimilarity() 一個判斷，是為了讓 SQL 編譯器、Polars 匯出
+ * 與設定表單三處都問同一個來源。各自記一次的話，記錯方向不會報錯 ——
+ * 只會讓「越像的配對越不被選中」，SQL 完全合法。
+ *
+ * 為什麼沒有 EDITDIST3：實測（DuckDB 1.5.5 / duckdb-wasm v1.4.3）它的預設成本
+ * 等於 levenshtein（`editdist3('abc','abd')` = 1 = `levenshtein`），
+ * 提供兩個名字指同一個東西只會讓 agent 選錯。需要自訂成本時再另開節點。
+ */
+const ALLOWED_MATCH_FUNCS = new Set([
+	"JARO_WINKLER",
+	"LEVENSHTEIN",
+	"DAMERAU_LEVENSHTEIN",
+	"EXACT",
+]);
+
+export function safeMatchFunc(m: unknown, fallback = "JARO_WINKLER"): string {
+	const normalized = String(m ?? "").trim().toUpperCase();
+	return ALLOWED_MATCH_FUNCS.has(normalized) ? normalized : fallback;
+}
+
+/** 這個函數是「相似度」（越大越像）還是「距離」（越小越像）？ */
+export function matchIsSimilarity(fn: string): boolean {
+	return fn === "JARO_WINKLER";
+}
+
+/**
+ * 門檻的預設值。兩種方向的量綱完全不同（0.85 的相似度 vs 3 的編輯距離），
+ * 所以不能共用一個數字 —— 共用會讓切換函數時門檻悄悄變成無意義的值。
+ */
+export function matchThresholdDefault(fn: string): number {
+	if (fn === "JARO_WINKLER") return 0.85;
+	if (fn === "EXACT") return 0;
+	return 3;
+}
+
+/**
+ * 門檻的數值。非數值輸入退回預設，而不是原樣塞進 SQL ——
+ * 這裡刻意回 number 而不是字串，呼叫端直接內插，沒有引號可逃逸。
+ */
+export function matchThreshold(value: unknown, fn: string): number {
+	if (fn === "EXACT") return 0;
+	const n = Number(value);
+	return Number.isFinite(n) ? n : matchThresholdDefault(fn);
+}
+
+/**
+ * 比對函數在 DuckDB 裡的名字。
+ *
+ * 這三個都是 DuckDB 內建（實測 duckdb-wasm v1.4.3 可用），不需要任何擴充：
+ * `jaro_winkler_similarity('martha','marhta')` = 0.9611111111111111、
+ * `levenshtein` / `damerau_levenshtein` 皆可用。
+ * 注意 DuckDB 的 damerau 是**無限制版**（unrestricted），不是常見的 OSA 變體：
+ * `damerau_levenshtein('ca','abc')` = 2，而 OSA 會給 3。
+ */
+export function duckdbMatchFn(fn: string): string {
+	switch (fn) {
+		case "LEVENSHTEIN":
+			return "levenshtein";
+		case "DAMERAU_LEVENSHTEIN":
+			return "damerau_levenshtein";
+		default:
+			return "jaro_winkler_similarity";
+	}
+}
+
+/**
+ * 候選對縮減方式。
+ *
+ *   NONE       → 全部配對（O(n*m)）
+ *   FIRST_CHAR → 只比首字元相同的配對
+ *
+ * FIRST_CHAR 是 OVERSAMPLE 那一類「先縮小候選集」的做法。它會改變結果
+ * （首字元打錯的配對永遠不會命中），所以是**使用者明確選擇**，不是預設。
+ */
+const ALLOWED_PREFILTERS = new Set(["NONE", "FIRST_CHAR"]);
+
+export function safePrefilter(m: unknown, fallback = "NONE"): string {
+	const normalized = String(m ?? "").trim().toUpperCase();
+	return ALLOWED_PREFILTERS.has(normalized) ? normalized : fallback;
+}
+
+/** 相似度分數的輸出欄位名；空字串 = 不輸出這個欄位 */
+export function safeScoreColumn(value: unknown, fallback = ""): string {
+	return String(value ?? "").trim() || fallback;
 }
 
 /**

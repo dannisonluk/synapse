@@ -16,6 +16,7 @@ export type AlteryxNodeType =
 	| "FORMULA"
 	| "SUMMARIZE"
 	| "JOIN"
+	| "FUZZY_JOIN"
 	| "SORT"
 	| "SELECT"
 	| "UNION"

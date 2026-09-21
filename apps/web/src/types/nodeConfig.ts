@@ -113,6 +113,19 @@ export const NODE_CONFIG_SHAPE = {
 	leftKey: "string",
 	rightKey: "string",
 
+	// --- FUZZY_JOIN -------------------------------------------------------
+	/**
+	 * 相似度/距離函數：JARO_WINKLER | LEVENSHTEIN | DAMERAU_LEVENSHTEIN | EXACT。
+	 * 注意方向：前三個「越像值越大或越小」不一致，見 sql.ts 的 matchIsSimilarity()。
+	 */
+	matchFunc: "string",
+	/** 門檻。相似度函數是下限（>=），距離函數是上限（<=）——方向由 matchFunc 決定 */
+	threshold: "number",
+	/** 把相似度/距離寫進這個欄位名；空字串 = 不輸出 */
+	scoreColumn: "string",
+	/** 候選對縮減：NONE | FIRST_CHAR（只比首字元相同的配對，省掉大部分 O(n*m)） */
+	prefilter: "string",
+
 	// --- SELECT / UNION / SAMPLE -----------------------------------------
 	/** SELECT 要投影的欄位；空陣列 = 全選 */
 	columns: "string[]",

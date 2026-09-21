@@ -655,6 +655,77 @@ export const NODE_CATALOG: Record<AlteryxNodeType, NodeSpec> = {
 		],
 	},
 
+	FUZZY_JOIN: {
+		type: "FUZZY_JOIN",
+		label: "Fuzzy Join",
+		category: "Join",
+		description: "用字串相似度（而非完全相等）合併兩個輸入，可選擇輸出相似度分數。",
+		whenToUse:
+			"使用者說「模糊比對 / 相似度合併 / 拼錯也對得上 / fuzzy match / 姓名或地址對照」時。" +
+			"鍵完全相等時請用 Join —— 這個節點會做兩兩比較，代價高得多。",
+		inputs: 2,
+		nodeType: "alteryxNode",
+		icon: "Fingerprint",
+		color: "text-violet-500",
+		defaults: {
+			matchFunc: "JARO_WINKLER",
+			threshold: 0.85,
+			joinType: "INNER",
+			leftKey: "name",
+			rightKey: "name",
+			prefilter: "NONE",
+			caseInsensitive: false,
+		},
+		fields: [
+			{ name: "leftKey", kind: "field", label: "左鍵", required: true },
+			{ name: "rightKey", kind: "field", label: "右鍵", required: true },
+			{
+				name: "matchFunc",
+				kind: "enum",
+				label: "比對方式",
+				values: ["JARO_WINKLER", "LEVENSHTEIN", "DAMERAU_LEVENSHTEIN", "EXACT"],
+				default: "JARO_WINKLER",
+				hint: "JARO_WINKLER 是相似度 0..1，門檻是下限；LEVENSHTEIN 與 DAMERAU_LEVENSHTEIN 是編輯距離，門檻是上限。",
+			},
+			{
+				name: "threshold",
+				kind: "number",
+				label: "門檻",
+				default: 0.85,
+				hint: "JARO_WINKLER 通常 0.85；編輯距離通常 2 到 3。方向的意義由比對方式決定。",
+			},
+			{
+				name: "joinType",
+				kind: "enum",
+				label: "未命中時",
+				values: ["INNER", "LEFT"],
+				default: "INNER",
+				hint: "INNER 只留命中的配對；LEFT 保留左表全部列，未命中的右表欄位為 NULL。",
+			},
+			{
+				name: "prefilter",
+				kind: "enum",
+				label: "候選縮減",
+				values: ["NONE", "FIRST_CHAR"],
+				default: "NONE",
+				hint: "FIRST_CHAR 只比首字元相同的配對，大幅減少比較次數，但首字元打錯的配對永遠不會命中。",
+			},
+			{
+				name: "scoreColumn",
+				kind: "text",
+				label: "分數欄位",
+				hint: "把相似度或編輯距離寫進這個欄位名；留空則不輸出。",
+			},
+			{
+				name: "caseInsensitive",
+				kind: "boolean",
+				label: "忽略大小寫",
+				default: false,
+				hint: "兩個引擎的相似度函數都區分大小寫（實測 jaro_winkler_similarity('hello','HELLO') = 0.0），需要時由這裡開啟。",
+			},
+		],
+	},
+
 	UNION: {
 		type: "UNION",
 		label: "Union",

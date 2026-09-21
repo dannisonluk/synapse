@@ -14,7 +14,7 @@
 import type { Edge, Node } from "@xyflow/react";
 import { orderUpstreamSources, topologicalSort } from "./scheduler";
 import { resolveSourceTables, falseBranchTable } from "./astCompiler";
-import { safeOp, safeFunc, safeJoinType, safeExpr, safeUnionMode, safeSampleMode, safeImputeMethod, safeRankMethod, safeUnmatched, safeRegexMode, regexPattern, safeMultiFieldOutputMode, safeNewFieldSuffix, hasCurrentField, applyCurrentField, safeSplitMode, intLit } from "./sql";
+import { safeOp, safeFunc, safeJoinType, safeFuzzyJoinType, safeExpr, safeUnionMode, safeSampleMode, safeImputeMethod, safeRankMethod, safeUnmatched, safeRegexMode, regexPattern, safeMultiFieldOutputMode, safeNewFieldSuffix, hasCurrentField, applyCurrentField, safeSplitMode, safeMatchFunc, matchIsSimilarity, matchThreshold, safePrefilter, safeScoreColumn, intLit } from "./sql";
 
 // ---------------------------------------------------------------------------
 // Python literal / identifier
@@ -256,7 +256,138 @@ interface EmitCtx {
 	needsReview: boolean;
 	/** 需要人工注意的說明，會以註解寫在腳本裡 */
 	notes: string[];
+	/** 需要在腳本開頭注入的輔助函式 key（見 HELPER_BLOCKS），重複的會被去重 */
+	helpers: string[];
 }
+
+/**
+ * 需要注入腳本開頭的 Python 輔助函式。
+ *
+ * 為什麼需要這個機制：Polars 1.44.2 **完全沒有**字串相似度函數
+ * （`str` namespace 已逐一列全，沒有 jaro_winkler / levenshtein / hamming），
+ * 而用 `difflib.SequenceMatcher` 是**另一個指標**——實測 'martha'/'marhta'
+ * 得到 0.8333，Jaro-Winkler 是 0.9611。換一個「看起來像」的指標就是靜默分歧，
+ * 所以這裡實作**同一個**指標，並由驗證套件斷言兩個引擎逐組一致。
+ *
+ * 實作裡有兩個實測抓到的細節（都不是憑印象寫的）：
+ *   - DuckDB 對 ('','') 給 **0.0**，不是 1.0。所以空字串必須在「相等就回 1.0」
+ *     這個短路**之前**處理，否則唯一的分歧就出現在這裡。
+ *   - DuckDB 的 `damerau_levenshtein` 是**無限制版**（可重複編輯同一子字串），
+ *     不是教科書常見的 OSA 變體：`damerau_levenshtein('ca','abc')` = 2，OSA 會給 3。
+ *
+ * 與 DuckDB 的對齊結果（scripts/verify.mjs 會重跑同樣的 fixture）：
+ *   jaro_winkler 17/17（最大誤差 0.000e+00）、damerau 11/11、levenshtein 5/5。
+ */
+const HELPER_BLOCKS: Record<string, string> = {
+	fuzzy: [
+		"def _synapse_jaro(s1, s2):",
+		'    """Jaro similarity —— 與 DuckDB 的 jaro_winkler_similarity 同一個定義。"""',
+		"    if len(s1) == 0 or len(s2) == 0:",
+		"        return 0.0  # DuckDB 對 ('','') 給 0.0，不是 1.0",
+		"    if s1 == s2:",
+		"        return 1.0",
+		"    l1, l2 = len(s1), len(s2)",
+		"    md = max(max(l1, l2) // 2 - 1, 0)",
+		"    f1, f2 = [False] * l1, [False] * l2",
+		"    m = 0",
+		"    for i in range(l1):",
+		"        for j in range(max(0, i - md), min(i + md + 1, l2)):",
+		"            if not f2[j] and s1[i] == s2[j]:",
+		"                f1[i] = f2[j] = True",
+		"                m += 1",
+		"                break",
+		"    if m == 0:",
+		"        return 0.0",
+		"    t, k = 0, 0",
+		"    for i in range(l1):",
+		"        if f1[i]:",
+		"            while not f2[k]:",
+		"                k += 1",
+		"            if s1[i] != s2[k]:",
+		"                t += 1",
+		"            k += 1",
+		"    t //= 2",
+		"    return (m / l1 + m / l2 + (m - t) / m) / 3.0",
+		"",
+		"",
+		"def _synapse_jaro_winkler(s1, s2, p=0.1):",
+		"    j = _synapse_jaro(s1, s2)",
+		"    if j <= 0.7:",
+		"        return j",
+		"    n = 0",
+		"    for a, b in zip(s1, s2):",
+		"        if a != b:",
+		"            break",
+		"        n += 1",
+		"        if n == 4:",
+		"            break",
+		"    return j + n * p * (1 - j)",
+		"",
+		"",
+		"def _synapse_levenshtein(s1, s2):",
+		"    if len(s1) < len(s2):",
+		"        s1, s2 = s2, s1",
+		"    prev = list(range(len(s2) + 1))",
+		"    for i, c1 in enumerate(s1, 1):",
+		"        cur = [i]",
+		"        for j, c2 in enumerate(s2, 1):",
+		"            cur.append(min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (c1 != c2)))",
+		"        prev = cur",
+		"    return prev[-1]",
+		"",
+		"",
+		"def _synapse_damerau(s1, s2):",
+		'    """無限制版 Damerau-Levenshtein（可重複編輯同一子字串），與 DuckDB 一致。"""',
+		"    la, lb = len(s1), len(s2)",
+		"    if la == 0:",
+		"        return lb",
+		"    if lb == 0:",
+		"        return la",
+		"    maxdist = la + lb",
+		"    d = [[0] * (lb + 2) for _ in range(la + 2)]",
+		"    d[0][0] = maxdist",
+		"    for i in range(0, la + 1):",
+		"        d[i + 1][0] = maxdist",
+		"        d[i + 1][1] = i",
+		"    for j in range(0, lb + 1):",
+		"        d[0][j + 1] = maxdist",
+		"        d[1][j + 1] = j",
+		"    da = {}",
+		"    for i in range(1, la + 1):",
+		"        db = 0",
+		"        for j in range(1, lb + 1):",
+		"            k = da.get(s2[j - 1], 0)",
+		"            prev_db = db",
+		"            if s1[i - 1] == s2[j - 1]:",
+		"                cost = 0",
+		"                db = j",
+		"            else:",
+		"                cost = 1",
+		"            d[i + 1][j + 1] = min(",
+		"                d[i][j] + cost,",
+		"                d[i + 1][j] + 1,",
+		"                d[i][j + 1] + 1,",
+		"                d[k][prev_db] + (i - k - 1) + 1 + (j - prev_db - 1),",
+		"            )",
+		"        da[s1[i - 1]] = i",
+		"    return d[la + 1][lb + 1]",
+		"",
+		"",
+		"def _synapse_fuzzy_score(s1, s2, func, lower=False):",
+		'    """回傳相似度（JARO_WINKLER，0..1）或編輯距離（整數）；NULL 進 NULL 出。"""',
+		"    if s1 is None or s2 is None:",
+		"        return None",
+		"    if lower:",
+		"        s1, s2 = s1.lower(), s2.lower()",
+		'    if func == "JARO_WINKLER":',
+		"        return _synapse_jaro_winkler(s1, s2)",
+		'    if func == "LEVENSHTEIN":',
+		"        return float(_synapse_levenshtein(s1, s2))",
+		'    if func == "DAMERAU_LEVENSHTEIN":',
+		"        return float(_synapse_damerau(s1, s2))",
+		"    return 1.0 if s1 == s2 else 0.0",
+	].join("\n"),
+};
 
 /** 把 config 裡可能是 string / string[] / undefined 的欄位清單正規化成 string[] */
 function nameList(value: unknown): string[] {
@@ -509,6 +640,132 @@ function emitNode(
 				`節點 ${id}：Polars 的欄位衝突後綴已設成 "_1" 以對齊 DuckDB 的命名（Polars 預設是 "_right"）`,
 			);
 			return `${id} = ${left}.join(${right}, left_on=${pyStr(leftKey)}, right_on=${pyStr(rightKey)}, how=${pyStr(how)}, suffix="_1")`;
+		}
+
+		case "FUZZY_JOIN": {
+			const left = upstream[0] || "raw_data";
+			const right = upstream[1] || "raw_data";
+			const leftKey = String(config?.leftKey ?? "").trim();
+			const rightKey = String(config?.rightKey ?? "").trim();
+
+			// 與 SQL 編譯器一致：沒有鍵就 passthrough，不猜鍵。
+			if (!leftKey || !rightKey) {
+				ctx.notes.push(
+					`節點 ${id}：未設定左右鍵 → 已當成 passthrough（不猜鍵，猜錯會變成笛卡兒積）`,
+				);
+				return `${id} = ${left}  # 未設定鍵 → passthrough`;
+			}
+
+			const fn = safeMatchFunc(config?.matchFunc);
+			const ci = config?.caseInsensitive === true;
+			// 與 SQL 編譯器用同一份白名單（INNER / LEFT）。Polars 這邊的模糊比對是
+			// cross join + 逐對算分，只有這兩種有對應實作；放行 FULL 會讓兩引擎無聲不一致。
+			const rawJoin = String(config?.joinType ?? "").trim().toUpperCase().replace(/\s+/g, " ");
+			const how = safeFuzzyJoinType(config?.joinType, "INNER").toLowerCase();
+			if (rawJoin && rawJoin !== how.toUpperCase()) {
+				ctx.notes.push(
+					`節點 ${id}：joinType=${pyStr(rawJoin)} 不在模糊比對支援的 ` +
+						`INNER / LEFT 之內，兩個引擎都已改用 INNER。`,
+				);
+			}
+			const score = safeScoreColumn(config?.scoreColumn);
+			const tmpRight = "__fz_rk";
+			const tmpScore = "__fz_score";
+			const outRightKey = `${rightKey}_1`;
+
+			const code: string[] = [];
+			// 先把右鍵改成保留名。否則同名時 Polars 會自動改成 <key>_1，
+			// 而「有沒有撞名」在產生腳本時是靜態未知的 —— 引用一個可能不存在或
+			// 可能被改名的欄位，正是那種「跑起來才知道錯」的寫法。
+			code.push(`${id}__r = ${right}.rename({${pyStr(rightKey)}: ${pyStr(tmpRight)}})`);
+
+			ctx.notes.push(
+				`節點 ${id}：右鍵欄位輸出為 ${pyStr(outRightKey)} 以對齊 DuckDB 的同名欄位後綴。` +
+					`（兩側鍵名不同時 DuckDB 會保留原名，這裡固定加後綴 —— 靜態無法得知是否會撞名。）`,
+			);
+
+			// ---- EXACT：退化情況不該走 cross join ----
+			// 精確比對就是等值 join，交給 Polars 的 hash join；用 cross join 再逐對算分
+			// 是 O(n*m)，在 EXACT 上白白多乘一個 n。
+			//
+			// 這裡刻意「先各自造一條同名臨時鍵，再 on= 那條鍵」，而不是 left_on/right_on：
+			// Polars 對 expression join 的右鍵保留與否取決於鍵是不是「衍生表達式」——
+			// 純欄名會被當成冗餘而丟掉（輸出就少了 DuckDB 會保留的 <右鍵>_1），
+			// 加了 .str.to_lowercase() 反而會留下來。那等於「忽略大小寫」與否會改變
+			// 輸出的欄位集合，是個升級 Polars 就可能無聲改變結果的依賴。
+			// 走 on= 這條路，兩種情況的欄位集合完全一致。
+			if (fn === "EXACT") {
+				const tmpLeft = "__fz_lk";
+				const lKey = `pl.col(${pyStr(leftKey)})`;
+				const rKey = `pl.col(${pyStr(tmpRight)})`;
+				const lExpr = ci ? `${lKey}.str.to_lowercase()` : lKey;
+				const rExpr = ci ? `${rKey}.str.to_lowercase()` : rKey;
+				code.push(`${id}__l = ${left}.with_columns(${lExpr}.alias(${pyStr(tmpLeft)}))`);
+				code.push(`${id}__r = ${id}__r.with_columns(${rExpr}.alias(${pyStr(tmpLeft)}))`);
+				code.push(
+					`${id} = ${id}__l.join(${id}__r, on=${pyStr(tmpLeft)}, how=${pyStr(how)}, suffix="_1")`,
+				);
+				code.push(
+					`${id} = ${id}.drop(${pyStr(tmpLeft)}).rename({${pyStr(tmpRight)}: ${pyStr(outRightKey)}})`,
+				);
+				ctx.notes.push(
+					`節點 ${id}：EXACT 用 Polars 原生等值 join（hash join），不做 O(n*m) 的 cross join。`,
+				);
+				if (score) {
+					ctx.notes.push(
+						`節點 ${id}：EXACT 不產生相似度分欄（與 SQL 編譯器一致），已忽略 scoreColumn=${pyStr(score)}。`,
+					);
+				}
+				return code.join("\n");
+			}
+
+			ctx.helpers.push("fuzzy");
+			ctx.notes.push(
+				`節點 ${id}：Polars 沒有字串相似度函數，已用內嵌的 _synapse_* 實作**同一個**指標；` +
+					`做法是 cross join，代價 O(n*m)（與 DuckDB 的 nested loop 同階）。`,
+			);
+
+			const lowerArg = ci ? ", lower=True" : "";
+			// EXACT 已在上面 return，這裡只可能是相似度或距離；方向不能憑感覺寫。
+			const cmp = matchIsSimilarity(fn) ? ">=" : "<=";
+			const threshold = String(matchThreshold(config?.threshold, fn));
+			// 候選縮減要跟 DuckDB 一樣只在開啟忽略大小寫時才 LOWER ——
+			// 無條件 LOWER 會讓 'K' 與 'k' 的首字元也視為相同，比 DuckDB 寬。
+			const firstChar = (col: string) =>
+				ci
+					? `pl.col(${pyStr(col)}).str.to_lowercase().str.slice(0, 1)`
+					: `pl.col(${pyStr(col)}).str.slice(0, 1)`;
+
+			code.push(`${id} = ${left}.join(${id}__r, how="cross", suffix="_1")`);
+			if (safePrefilter(config?.prefilter) === "FIRST_CHAR") {
+				code.push(
+					`${id} = ${id}.filter(${firstChar(leftKey)} == ${firstChar(tmpRight)})  # 候選縮減：首字元相同`,
+				);
+			}
+			code.push(
+				`${id} = ${id}.with_columns(` +
+					`pl.struct([${pyStr(leftKey)}, ${pyStr(tmpRight)}])` +
+					`.map_elements(lambda r: _synapse_fuzzy_score(r[${pyStr(leftKey)}], r[${pyStr(tmpRight)}], ${pyStr(fn)}${lowerArg}), return_dtype=pl.Float64)` +
+					`.alias(${pyStr(tmpScore)}))`,
+			);
+			code.push(`${id} = ${id}.filter(pl.col(${pyStr(tmpScore)}) ${cmp} ${threshold})`);
+			code.push(`${id} = ${id}.rename({${pyStr(tmpRight)}: ${pyStr(outRightKey)}})`);
+			if (score) {
+				code.push(`${id} = ${id}.rename({${pyStr(tmpScore)}: ${pyStr(score)}})`);
+			} else {
+				code.push(`${id} = ${id}.drop(${pyStr(tmpScore)})`);
+			}
+
+			// LEFT：cross join + filter 會把未命中的左表列直接丟掉，語意變成 INNER。
+			// 所以要把「左表裡一列都沒命中的」補回來（右表欄位為 null）——
+			// 這正是 SQL LEFT JOIN 的定義，用 anti join + diagonal concat 表達。
+			if (how === "left") {
+				code.push(
+					`${id} = pl.concat([${id}, ${left}.join(${id}.select(${pyStr(leftKey)}).unique(), on=${pyStr(leftKey)}, how="anti")], how="diagonal_relaxed")  # LEFT：補回未命中的左表列`,
+				);
+			}
+
+			return code.join("\n");
 		}
 
 		case "SORT": {
@@ -885,6 +1142,8 @@ export function exportToPolars(
 	const skipped: string[] = [];
 	const needsReview: string[] = [];
 	const notes: string[] = [];
+	/** 需要在腳本開頭注入的輔助函式（Set 去重：多個 FUZZY_JOIN 只注入一次） */
+	const neededHelpers = new Set<string>();
 	const blocks: { id: string; label: string; type: string; code: string }[] = [];
 
 	for (const id of order) {
@@ -914,10 +1173,11 @@ export function exportToPolars(
 			externalSources.add(src);
 		}
 
-		const ctx: EmitCtx = { needsReview: false, notes: [] };
+		const ctx: EmitCtx = { needsReview: false, notes: [], helpers: [] };
 		const code = emitNode(id, type, data.config || {}, upstream, ctx);
 		if (ctx.needsReview) needsReview.push(id);
 		for (const n of ctx.notes) notes.push(n);
+		for (const h of ctx.helpers) neededHelpers.add(h);
 		blocks.push({ id, label, type, code });
 	}
 
@@ -975,6 +1235,16 @@ export function exportToPolars(
 			skipped,
 			needsReview,
 		};
+	}
+
+	// 輔助函式要在任何節點之前定義。排序只是為了讓輸出穩定（同一份 DAG 每次產生
+	// 的腳本必須逐字節相同，否則驗證套件的比對會變成擲骰子）。
+	for (const key of [...neededHelpers].sort()) {
+		const block = HELPER_BLOCKS[key];
+		if (!block) continue;
+		lines.push(`# --- 輔助函式（${key}）---`);
+		lines.push(block);
+		lines.push("");
 	}
 
 	for (const b of blocks) {

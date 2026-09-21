@@ -15,7 +15,13 @@ import {
 } from "lucide-react";
 import { useTheme } from "../../../theme/ThemeContext";
 import { ikaros } from "../../../engine/ikaros/client";
-import { qi, hasCurrentField } from "../../../engine/sql";
+import {
+	qi,
+	hasCurrentField,
+	safeMatchFunc,
+	matchIsSimilarity,
+	matchThresholdDefault,
+} from "../../../engine/sql";
 import {
 	useUpstreamColumns,
 	type UpstreamColumn,
@@ -982,6 +988,174 @@ export const AlteryxNode: React.FC<NodeProps<Node<AlteryxNodeData>>> = ({
 						</div>
 					</div>
 				)}
+
+				{/* 5b. FUZZY_JOIN 節點介面 */}
+				{nodeType === "FUZZY_JOIN" && (() => {
+					// 方向由 matchFunc 決定（相似度是下限、編輯距離是上限）。
+					// 這裡刻意問 engine/sql.ts 的同一個函數，而不是在表單裡再記一次 ——
+					// 記錯方向不會報錯，只會讓「越像的越不被選中」。
+					const fn = safeMatchFunc(config.matchFunc);
+					const isSim = matchIsSimilarity(fn);
+					const dirLabel =
+						fn === "EXACT"
+							? "完全相等"
+							: isSim
+								? "相似度 ≥ 門檻"
+								: "編輯距離 ≤ 門檻";
+					return (
+						<div
+							className={`p-2 rounded border space-y-1 ${
+								isLight
+									? "bg-stone-50/80 border-stone-200/60"
+									: "bg-slate-900/60 border-slate-800"
+							}`}
+						>
+							<div className="text-[9px] font-bold font-mono tracking-wider opacity-60 uppercase">
+								Fuzzy Match Keys
+							</div>
+							<div className="flex space-x-1">
+								<FieldInput
+									listId={`fz-left-${id}`}
+									options={upstream.byTable[0] || []}
+									value={config.leftKey || ""}
+									onValueChange={(v) =>
+										updateConfig("leftKey", v)
+									}
+									placeholder="Left Key"
+									className={`w-full ${inputCls}`}
+								/>
+								<FieldInput
+									listId={`fz-right-${id}`}
+									options={upstream.byTable[1] || []}
+									value={config.rightKey || ""}
+									onValueChange={(v) =>
+										updateConfig("rightKey", v)
+									}
+									placeholder="Right Key"
+									className={`w-full ${inputCls}`}
+								/>
+							</div>
+
+							{/* 沒有鍵就無從比對 → 編譯器退回 passthrough。不講的話
+							    使用者只會看到節點「什麼都沒做」。 */}
+							{(!String(config.leftKey ?? "").trim() ||
+								!String(config.rightKey ?? "").trim()) && (
+								<div className="text-[9px] font-mono text-red-500 leading-tight">
+									未設定左右鍵 → 這個節點會直接通過（passthrough），不做任何比對
+								</div>
+							)}
+
+							<div className="flex space-x-1">
+								<select
+									value={fn}
+									onChange={(e) =>
+										updateConfigValue({
+											matchFunc: e.target.value,
+											// 切換函數時門檻的量綱也變了，一併換成該函數的預設值，
+											// 否則 0.85 會被當成編輯距離（永遠不命中）。
+											threshold: matchThresholdDefault(
+												safeMatchFunc(e.target.value),
+											),
+										})
+									}
+									className={`flex-1 ${selectCls}`}
+								>
+									<option value="JARO_WINKLER">
+										JARO_WINKLER
+									</option>
+									<option value="LEVENSHTEIN">
+										LEVENSHTEIN
+									</option>
+									<option value="DAMERAU_LEVENSHTEIN">
+										DAMERAU_LEVENSHTEIN
+									</option>
+									<option value="EXACT">EXACT</option>
+								</select>
+								<input
+									type="number"
+									step="0.01"
+									value={
+										config.threshold ??
+										matchThresholdDefault(fn)
+									}
+									disabled={fn === "EXACT"}
+									onChange={(e) =>
+										updateConfigValue({
+											threshold: Number(e.target.value),
+										})
+									}
+									title="門檻"
+									className={`w-20 ${inputCls} ${
+										fn === "EXACT" ? "opacity-40" : ""
+									}`}
+								/>
+								<select
+									value={config.joinType || "INNER"}
+									onChange={(e) =>
+										updateConfig("joinType", e.target.value)
+									}
+									className={`w-20 ${selectCls}`}
+								>
+									<option value="INNER">INNER</option>
+									<option value="LEFT">LEFT</option>
+								</select>
+							</div>
+
+							<div className="text-[9px] font-mono opacity-60 leading-tight">
+								{dirLabel}
+								{fn !== "EXACT" &&
+									`（${matchThresholdDefault(fn)} 是預設值）`}
+							</div>
+
+							<div className="flex space-x-1">
+								<select
+									value={config.prefilter || "NONE"}
+									onChange={(e) =>
+										updateConfig("prefilter", e.target.value)
+									}
+									title="候選縮減：先縮小要兩兩比較的配對數"
+									className={`w-24 ${selectCls}`}
+								>
+									<option value="NONE">NONE</option>
+									<option value="FIRST_CHAR">FIRST_CHAR</option>
+								</select>
+								<input
+									value={config.scoreColumn ?? ""}
+									onChange={(e) =>
+										updateConfig(
+											"scoreColumn",
+											e.target.value,
+										)
+									}
+									disabled={fn === "EXACT"}
+									placeholder="分數欄位（留空則不輸出）"
+									className={`flex-1 ${inputCls} ${
+										fn === "EXACT" ? "opacity-40" : ""
+									}`}
+								/>
+							</div>
+
+							<label className="flex items-center space-x-1 text-[9px] font-mono opacity-70">
+								<input
+									type="checkbox"
+									checked={config.caseInsensitive === true}
+									onChange={(e) =>
+										updateConfigValue({
+											caseInsensitive: e.target.checked,
+										})
+									}
+								/>
+								<span>
+									忽略大小寫（兩邊先 LOWER —— 相似度函數本身區分大小寫）
+								</span>
+							</label>
+
+							<div className="text-[9px] font-mono opacity-50 leading-tight">
+								FIRST_CHAR 只比首字元相同的配對，省掉大部分 O(n×m) 比較；首字元打錯的配對永遠不會命中。
+							</div>
+						</div>
+					);
+				})()}
 
 				{/* 6. SORT 節點介面 */}
 				{nodeType === "SORT" && (
