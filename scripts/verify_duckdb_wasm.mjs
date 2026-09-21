@@ -1038,6 +1038,202 @@ export async function runDuckDbWasmChecks(root, loadTs, fallbackPipelines = []) 
 		q("SELECT name FROM fz_full;"), [["martha"]]);
 
 	// =====================================================================
+	// 11h. SPATIAL_MATCH：空間比對（需要 LOAD spatial）
+	// =====================================================================
+	// 三個實測事實決定了這個節點的形狀，每一條都在這裡釘住：
+	//
+	// 1. 出貨的 duckdb-wasm 把 spatial **靜態連結**進去，所以 LOAD spatial 會成功
+	//    而 INSTALL spatial 是 no-op（installed 永遠 false —— wasm 沒有網路）。
+	//    但**全新連線預設沒載入**，直接呼叫會得到
+	//    "Catalog Error: ... not in the catalog, but it exists in the spatial
+	//     extension"。所以編譯器一定要補 LOAD，這不是保險起見。
+	// 2. 壞掉的 WKT 會讓 ST_GeomFromText **拋錯**，不是回 NULL → 一定要包 TRY()。
+	// 3. ST_Distance_Sphere 在這個 build 就是「平面度數 × 111194.93」，沒有經度
+	//    收斂修正（同一段 1 度經差在赤道與 lat 60 量到同一個值）。所以 METERS
+	//    只是個換算，不是真的球面距離 —— 這點寫進目錄的欄位提示裡了。
+	// 兩張 fixture 的 DDL 存起來：下面的乾淨實例也要用同一份（見 LOAD 對照組）。
+	const SP_PTS_DDL = `CREATE OR REPLACE TABLE sp_pts AS SELECT * FROM (VALUES
+		(1, 'HK', 114.17, 22.30),
+		(2, 'SZ', 114.06, 22.54),
+		(3, 'TK', 139.69, 35.69)) AS t(id, city, lon, lat);`;
+	const SP_ZONES_DDL = `CREATE OR REPLACE TABLE sp_zones AS SELECT * FROM (VALUES
+		(10, 'Kowloon', 'POLYGON((114.0 22.2, 114.0 22.4, 114.3 22.4, 114.3 22.2, 114.0 22.2))'),
+		(11, 'Tokyo', 'POLYGON((139.6 35.6, 139.6 35.8, 139.8 35.8, 139.8 35.6, 139.6 35.6))'))
+		AS t(zone_id, zone, wkt);`;
+	conn.query(SP_PTS_DDL);
+	conn.query(SP_ZONES_DDL);
+
+	const spCfg = (over = {}) => ({
+		leftLonField: "lon", leftLatField: "lat", rightGeometryField: "wkt",
+		spatialPredicate: "INTERSECTS", joinType: "INNER", ...over });
+	const spRun = (id, over) => conn.query(
+		compiler.generateSqlFromConfig(id, "SPATIAL_MATCH", spCfg(over), ["sp_pts", "sp_zones"]));
+
+	// LOAD 前綴：編譯出來的語句必須自己帶上，否則換一條連線就掛。
+	add("SPATIAL_MATCH emits a LOAD spatial preamble",
+		compiler.compileNodeStatements("sp_x", "SPATIAL_MATCH",
+			spCfg(), ["sp_pts", "sp_zones"])[0], "LOAD spatial;");
+	add("a non-spatial node emits no LOAD preamble",
+		compiler.compileNodeStatements("f_x", "FILTER", {}, ["sp_pts"])[0].startsWith("LOAD"), false);
+
+	// 經緯度兩欄 → ST_Point(經度, 緯度)。實測 ST_Point 的第一個參數是 X。
+	add("SPATIAL_MATCH builds a point from lon/lat in the right order",
+		compiler.compileNodeSelect("sp_x", "SPATIAL_MATCH", spCfg(), ["sp_pts", "sp_zones"])
+			.includes('ST_Point(TRY_CAST(a."lon" AS DOUBLE), TRY_CAST(a."lat" AS DOUBLE))'),
+		true);
+	// WKT 一定要包 TRY()，否則一列壞 WKT 就讓整個 join 拋錯。
+	add("SPATIAL_MATCH wraps WKT parsing in TRY",
+		compiler.compileNodeSelect("sp_x", "SPATIAL_MATCH", spCfg(), ["sp_pts", "sp_zones"])
+			.includes('TRY(ST_GeomFromText(b."wkt"))'),
+		true);
+
+	spRun("sp_in");
+	add("SPATIAL_MATCH INTERSECTS matches the two points that fall inside a zone",
+		q("SELECT city, zone FROM sp_in ORDER BY city;"), [["HK", "Kowloon"], ["TK", "Tokyo"]]);
+	add("...and leaves out the one that does not",
+		q("SELECT count(*) FROM sp_in;"), [["2"]]);
+
+	// 方向：CONTAINS 是「左包含右」、WITHIN 是「左落在右之內」。
+	// 左邊是點、右邊是多邊形，所以 WITHIN 命中、CONTAINS 不命中 ——
+	// 兩個寫反了不會報錯，只會永遠回 0 列。
+	spRun("sp_contains", { spatialPredicate: "CONTAINS" });
+	add("SPATIAL_MATCH CONTAINS is left-contains-right (so point CONTAINS polygon is empty)",
+		q("SELECT count(*) FROM sp_contains;"), [["0"]]);
+	spRun("sp_within", { spatialPredicate: "WITHIN" });
+	add("SPATIAL_MATCH WITHIN is left-inside-right (so the same data matches)",
+		q("SELECT count(*) FROM sp_within;"), [["2"]]);
+
+	// LEFT：未命中的左表列要留著
+	spRun("sp_left", { joinType: "LEFT" });
+	add("SPATIAL_MATCH LEFT keeps the unmatched left row with a null zone",
+		q("SELECT city, zone FROM sp_left ORDER BY city;"),
+		[["HK", "Kowloon"], ["SZ", "null"], ["TK", "Tokyo"]]);
+
+	// 距離：先確認這個 build 的 ST_Distance 是平面度數（3-4-5 直角三角形 = 5）
+	add("ST_Distance in this build is planar (3-4-5 triangle = 5)",
+		q("SELECT ST_Distance(ST_Point(0,0), ST_Point(3,4));"), [["5"]]);
+	// 0.005 度經差。DEGREES 門檻 0.01 命中、0.001 不命中。
+	conn.query(`CREATE OR REPLACE TABLE sp_poi AS SELECT * FROM (VALUES
+		(1, 114.1700, 22.3000), (2, 114.1750, 22.3000)) AS t(poi_id, lon, lat);`);
+	const spRunPoi = (id, over) => conn.query(
+		compiler.generateSqlFromConfig(id, "SPATIAL_MATCH",
+			{ leftLonField: "lon", leftLatField: "lat", rightLonField: "lon", rightLatField: "lat",
+			  spatialPredicate: "DWITHIN", joinType: "INNER", ...over }, ["sp_poi", "sp_poi"]));
+
+	spRunPoi("sp_d01", { distance: 0.01, distanceUnit: "DEGREES" });
+	add("SPATIAL_MATCH DWITHIN in DEGREES matches within the threshold",
+		q("SELECT count(*) FROM sp_d01;"), [["4"]]);
+	spRunPoi("sp_d001", { distance: 0.001, distanceUnit: "DEGREES" });
+	add("SPATIAL_MATCH DWITHIN in DEGREES excludes beyond the threshold",
+		q("SELECT count(*) FROM sp_d001;"), [["2"]]);
+	// 同一組資料換成 METERS：0.005 度 ≈ 555.97 公尺
+	spRunPoi("sp_m1000", { distance: 1000, distanceUnit: "METERS" });
+	add("SPATIAL_MATCH DWITHIN in METERS matches within 1000 m",
+		q("SELECT count(*) FROM sp_m1000;"), [["4"]]);
+	spRunPoi("sp_m100", { distance: 100, distanceUnit: "METERS" });
+	add("SPATIAL_MATCH DWITHIN in METERS excludes beyond 100 m",
+		q("SELECT count(*) FROM sp_m100;"), [["2"]]);
+	// 而且距離欄位的值必須跟著單位換 —— 只換門檻不換輸出是最容易漏的一半。
+	// 門檻用 1000 公尺（0.005 度 ≈ 555.97 公尺，要放得進去）。
+	spRunPoi("sp_dc", { distance: 1000, distanceUnit: "METERS", distanceColumn: "d" });
+	add("SPATIAL_MATCH writes the distance in the chosen unit",
+		q("SELECT round(d, 2) FROM sp_dc WHERE poi_id = 2 AND poi_id_1 = 1;"), [["555.97"]]);
+
+	// 壞 WKT：不能讓整個查詢拋錯，那一列要變成 NULL（不命中）
+	conn.query(`CREATE OR REPLACE TABLE sp_bad AS SELECT * FROM (VALUES
+		(1, 'NOPE'), (2, 'POINT(114.17 22.30)')) AS t(id, wkt);`);
+	conn.query(compiler.generateSqlFromConfig("sp_bad_out", "SPATIAL_MATCH",
+		{ leftGeometryField: "wkt", rightGeometryField: "wkt", spatialPredicate: "INTERSECTS" },
+		["sp_bad", "sp_bad"]));
+	add("a malformed WKT row becomes NULL instead of aborting the join",
+		q("SELECT count(*) FROM sp_bad_out;"), [["1"]]);
+	// 對照：不包 TRY 的裸 ST_GeomFromText 會拋錯 —— 證明 TRY 不是裝飾。
+	// （harness 的 q() 本身不吞錯，所以這裡自己接。）
+	let bareWktThrew = false;
+	try {
+		conn.query("SELECT ST_GeomFromText('NOPE');");
+	} catch {
+		bareWktThrew = true;
+	}
+	add("without TRY a malformed WKT really does throw (so TRY is load-bearing)",
+		bareWktThrew, true);
+
+	// 幾何無從取得 → passthrough（與 FUZZY_JOIN 的「不猜鍵」同一條原則）
+	conn.query(compiler.generateSqlFromConfig("sp_none", "SPATIAL_MATCH",
+		{ leftLonField: "", leftLatField: "" }, ["sp_pts", "sp_zones"]));
+	add("SPATIAL_MATCH with no geometry source is a passthrough",
+		q("SELECT city FROM sp_none ORDER BY city;"), [["HK"], ["SZ"], ["TK"]]);
+	add("SPATIAL_MATCH passthrough adds no right-hand columns",
+		schema("sp_none"), ["id", "city", "lon", "lat"]);
+
+	// DWITHIN 的門檻與輸出欄位必須是同一個表達式。這條是實測踩出來的：
+	// 第一版把 distanceUnit 只用在輸出欄位，門檻卻原值丟給 ST_DWithin，
+	// 於是「100 公尺」被當成「100 度」—— 不會報錯，只是全部命中。
+	const dwDeg = compiler.compileNodeSelect("sp_x", "SPATIAL_MATCH",
+		{ leftLonField: "lon", leftLatField: "lat", rightLonField: "lon", rightLatField: "lat",
+		  spatialPredicate: "DWITHIN", distance: 0.01, distanceUnit: "DEGREES" }, ["a", "b"]);
+	const dwM = compiler.compileNodeSelect("sp_x", "SPATIAL_MATCH",
+		{ leftLonField: "lon", leftLatField: "lat", rightLonField: "lon", rightLatField: "lat",
+		  spatialPredicate: "DWITHIN", distance: 100, distanceUnit: "METERS" }, ["a", "b"]);
+	add("DWITHIN in DEGREES compares against ST_Distance",
+		dwDeg.includes("ST_Distance(") && dwDeg.includes("<= 0.01"), true);
+	add("DWITHIN in METERS compares against ST_Distance_Sphere (not ST_DWithin with raw metres)",
+		dwM.includes("ST_Distance_Sphere(") && dwM.includes("<= 100"), true);
+	add("...and never passes a raw metre value to ST_DWithin",
+		dwM.includes("ST_DWithin("), false);
+
+	// 匯出的 SQL 腳本要真的跑得動 —— 前面只證明它「長得像對的」。
+	const exporter = await loadTs("apps/web/src/engine/exporter.ts");
+	const spCte = exporter.exportToSqlCte(
+		[
+			{ id: "node_l", data: { label: "L", type: "INPUT_DUCKDB", config: { fileName: "sp_pts.csv", tableName: "sp_pts" } } },
+			{ id: "node_r", data: { label: "R", type: "INPUT_DUCKDB", config: { fileName: "sp_zones.csv", tableName: "sp_zones" } } },
+			{ id: "node_j", data: { label: "J", type: "SPATIAL_MATCH", config: {
+				leftLonField: "lon", leftLatField: "lat", rightGeometryField: "wkt" } } },
+		],
+		[
+			{ id: "e1", source: "node_l", target: "node_j" },
+			{ id: "e2", source: "node_r", target: "node_j" },
+		],
+	);
+	let cteErr = "ok";
+	try {
+		conn.query(spCte.sql);
+	} catch (err) {
+		cteErr = "ERR: " + String(err.message).split("\n")[0].slice(0, 90);
+	}
+	add("the exported spatial CTE script actually runs", cteErr, "ok");
+
+	// 對照組必須用**另一個 duckdb 實例**：LOAD 是載入到「資料庫實例」層級的，
+	// 同一實例的新連線會共享已載入的擴充。第一版就是只在 bindings 上開新連線，
+	// 於是拿掉 LOAD 也照樣成功 —— 對照組假通過，等於沒測。
+	const cleanBindings = await duckdb.createDuckDB(
+		BUNDLES, new duckdb.VoidLogger(), duckdb.NODE_RUNTIME);
+	await cleanBindings.instantiate();
+	// 乾淨實例也要有同樣的來源表，否則對照組會因為「表不存在」而失敗，
+	// 那又變成另一種假通過（錯的原因、對的結論）。
+	const cleanConn = cleanBindings.connect();
+	cleanConn.query(SP_PTS_DDL);
+	cleanConn.query(SP_ZONES_DDL);
+	let noLoadFailed = false;
+	try {
+		cleanConn.query(spCte.sql.replace("LOAD spatial;", ""));
+	} catch {
+		noLoadFailed = true;
+	}
+	add("without the LOAD preamble the same script fails on a clean instance",
+		noLoadFailed, true);
+	// 而同一個乾淨實例、加上 LOAD 就成功 —— 兩條一起才證明那句是必要的。
+	let cleanOk = "ok";
+	try {
+		cleanConn.query(spCte.sql);
+	} catch (err) {
+		cleanOk = "ERR: " + String(err.message).split("\n")[0].slice(0, 90);
+	}
+	add("the same script succeeds on that clean instance once the LOAD is present",
+		cleanOk, "ok");
+
+	// =====================================================================
 	// 12. 視窗 / 序列組：MULTI_ROW_FORMULA / RUNNING_TOTAL / RANK
 	// =====================================================================
 	conn.query(
@@ -1289,9 +1485,9 @@ export async function runDuckDbWasmChecks(root, loadTs, fallbackPipelines = []) 
 	// 那其實是在抱怨「這張表沒有那個欄位」，不是編譯器有問題。
 	conn.query(
 		`CREATE OR REPLACE TABLE probe_src AS SELECT * FROM (VALUES
-			(1, 2024, 'HK', 'a', 100, 1, 'name1', 'x,y', 'C1', 'Label One'),
-			(2, 2025, 'TW', 'b', 200, 2, 'name2', 'z', 'C2', 'Label Two')
-		) AS t(id, year, country, category, amount, seq, name, raw, code, label);`,
+			(1, 2024, 'HK', 'a', 100, 1, 'name1', 'x,y', 'C1', 'Label One', 114.1, 22.3),
+			(2, 2025, 'TW', 'b', 200, 2, 'name2', 'z', 'C2', 'Label Two', 121.5, 25.0)
+		) AS t(id, year, country, category, amount, seq, name, raw, code, label, lon, lat);`,
 	);
 	const probeUpstream = ["probe_src", "probe_src"];
 
@@ -1311,7 +1507,7 @@ export async function runDuckDbWasmChecks(root, loadTs, fallbackPipelines = []) 
 	//      （inputs >= 2 的節點必須拿得到兩個上游）
 	const twoInput = catalogTypes.filter((t) => catalog.NODE_CATALOG[t].inputs === 2);
 	add("catalog declares exactly the dual-input nodes", twoInput.sort(),
-		["APPEND_FIELDS", "FIND_REPLACE", "FUZZY_JOIN", "JOIN"]);
+		["APPEND_FIELDS", "FIND_REPLACE", "FUZZY_JOIN", "JOIN", "SPATIAL_MATCH"]);
 	for (const t of twoInput) {
 		add(`${t} resolves two upstream tables`,
 			compiler.resolveSourceTables("x", t, [

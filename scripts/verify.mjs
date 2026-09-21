@@ -523,6 +523,26 @@ check("cycle -> null (cannot be linearised into SQL)",
 check("empty graph still yields valid SQL",
 	exporter.exportToSqlCte([], []).sql.endsWith("SELECT 1 AS empty_workflow;"), true);
 
+// SPATIAL_MATCH 需要 LOAD spatial（實測：全新連線沒載入，直接呼叫會 Catalog Error）。
+// LOAD 是一條獨立語句，塞進 CTE 會是語法錯誤，所以必須排在 WITH 之前。
+// 這裡只檢查順序與有無；「真的跑得動」由 wasm 那一節用真實引擎證明。
+const spCte = exporter.exportToSqlCte(
+	[
+		mk("node_l", { label: "L", type: "INPUT_DUCKDB", config: { fileName: "sp_pts.csv", tableName: "sp_pts" } }),
+		mk("node_r", { label: "R", type: "INPUT_DUCKDB", config: { fileName: "sp_zones.csv", tableName: "sp_zones" } }),
+		mk("node_j", { label: "J", type: "SPATIAL_MATCH", config: {
+			leftLonField: "lon", leftLatField: "lat", rightGeometryField: "wkt" } }),
+	],
+	[
+		{ id: "e1", source: "node_l", target: "node_j" },
+		{ id: "e2", source: "node_r", target: "node_j" },
+	],
+);
+has("a spatial workflow exports a LOAD spatial preamble", spCte.sql, "LOAD spatial;");
+check("...placed before the WITH (LOAD is a separate statement)",
+	spCte.sql.indexOf("LOAD spatial;") < spCte.sql.indexOf("WITH"), true);
+check("a non-spatial workflow exports no LOAD", cte.sql.includes("LOAD "), false);
+
 // raw SQL 節點（使用者自己寫的，沒有 data.type）
 {
 	const raw = exporter.exportToSqlCte([mk("node-init", {
@@ -1201,6 +1221,23 @@ section("8. exportPolars.ts — Python / Polars 腳本匯出");
 			[mk("a", { label: "A", type: "FILTER", config: {} }), mk("b", { label: "B", type: "FILTER", config: {} })],
 			[{ id: "e1", source: "a", target: "b" }, { id: "e2", source: "b", target: "a" }]),
 		null);
+
+	// --- SPATIAL_MATCH：唯一一個「兩個引擎不可能一致」的節點 ---
+	// Polars 沒有任何空間函式（沒有 GEOS 綁定，整個 API 沒有 ST_* 的對應物），
+	// 所以這裡刻意**不**做成 passthrough：一個「只回左表」的輸出看起來像 join
+	// 成功了，實際上是無聲地少了一整張表。改成留空佔位 + TODO + needsReview，
+	// 讓它大聲失敗（下游一引用欄位就 NameError）。
+	const spPolars = oneRes("SPATIAL_MATCH", {
+		leftLonField: "lon", leftLatField: "lat",
+		rightLonField: "lon", rightLatField: "lat",
+	});
+	check("an untranslatable SPATIAL_MATCH is reported for review",
+		spPolars.needsReview, ["node_x"]);
+	has("...leaves a TODO naming the reason", spPolars.script, "# TODO: SPATIAL_MATCH");
+	check("...and does not pretend the join happened",
+		spPolars.script.includes("pl.DataFrame()"), true);
+	check("...and never emits a passthrough of the left frame",
+		/^node_x = raw_data\s*$/m.test(spPolars.script), false);
 
 	// --- 產生的腳本必須是合法的 Python（用 CPython 真的編譯一次）---
 	// 字串比對只能證明「看起來像 Python」。這裡真的交給 CPython 檢查語法。
