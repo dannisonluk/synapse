@@ -5,7 +5,7 @@
 # 用途：新增節點類型或修改 Polars 匯出時，先在這裡把 DuckDB 與 Polars 的
 # 行為並排印出來，確認兩邊語意是否一致，再動手寫 emitter。
 #
-# 為什麼要有這支：本專案已經踩過 6 個跨引擎差異，全部是「兩邊看起來都對、
+# 為什麼要有這支：本專案已經踩過 9 個跨引擎差異，全部是「兩邊看起來都對、
 # 但算出來的數字不同」的類型 —— 這種 bug 靠讀文件找不到，只能實測。
 # 已發現並記錄在 exportPolars.ts 與 README 的差異：
 #   1. Polars `list.get(i)` 越界會 throw；DuckDB `string_split(s,',')[i]` 回 NULL
@@ -16,6 +16,16 @@
 #   4. `pivot` 缺失組合：Polars 補 0、DuckDB 補 NULL
 #   5. `rank()` 對 NULL 輸入：Polars 回 null、DuckDB 照排名
 #   6. `rename`：兩邊都保留欄位順序（一致）
+#   7. 模糊比對：兩邊都沒有 Jaro / Jaro-Winkler
+#      → 匯出要注入同一份純 Python 實作，而且分數必須逐位相同（已斷言）
+#   8. 欄位名 join 的右鍵：DuckDB 會把右表 join key 留成 `<key>_1`，
+#      Polars 的欄位名 join 直接把右鍵丟掉 → 匯出要自造臨時鍵，
+#      否則兩邊的「欄位集合」不同（列對了但 schema 不一樣，下游會炸）
+#   9. 空間函式：Polars 完全沒有（無 GEOS 綁定）→ SPATIAL_MATCH 刻意不翻譯。
+#      另記兩個實測事實：這個 build 的 `ST_Distance_Sphere` 就是
+#      `ST_Distance × 111194.92664455874`，完全不補經度收斂（赤道與北緯 60 度的
+#      1 度經差量到一樣長）→ METERS 離開赤道會高估東西向距離；
+#      而 `ST_SRID` / `ST_SetSRID` 在這個 build 裡不存在。
 #
 # 用法（需要 duckdb 與 polars；可用 requirements-dev.txt 安裝）：
 #   apps/server/venv/Scripts/python.exe scripts/probe_engines.py
