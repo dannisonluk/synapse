@@ -30,95 +30,17 @@ import {
 	intLit,
 } from "./sql";
 import type { Edge } from "@xyflow/react";
+// 節點 config 的形狀宣告在 types/nodeConfig.ts —— 那是唯一一份。
+// 本檔以前手抄了一份 NodeConfig（與另外兩份互不檢查），現已收斂成別名。
+// 用 import type 是刻意的：本檔會被 Web Worker import，型別 import 會被完全抹除。
+import type {
+	NodeConfig,
+	SummarizeAggregation,
+	RenamePair,
+} from "../types/nodeConfig";
 
-/** SUMMARIZE 的一組聚合（可多組並存） */
-export interface SummarizeAggregation {
-	/** SUM / AVG / COUNT / COUNT_DISTINCT / MIN / MAX / STDDEV / MEDIAN / ANY_VALUE */
-	func?: string;
-	/** 目標欄位；`*` 代表 COUNT(*) */
-	target?: string;
-}
-
-/** RENAME 的一組改名（可多組並存） */
-export interface RenamePair {
-	from?: string;
-	to?: string;
-}
-
-/** 節點配置（結構上與 AlteryxNodeConfig 一致，但不依賴元件檔） */
-export interface NodeConfig {
-	field?: string;
-	op?: string;
-	val?: string;
-	/**
-	 * SUMMARIZE 的分組鍵。
-	 *   string        → 舊格式，單一鍵（也接受 "a, b" 逗號分隔）
-	 *   string[]      → 多鍵；空陣列 = 不分组（純聚合）
-	 *   undefined     → 沿用舊預設 ["year"]
-	 */
-	groupBy?: string | string[];
-	/** 舊格式：單一聚合函數（aggregations 為空時的 fallback） */
-	func?: string;
-	/** 舊格式：單一聚合目標（aggregations 為空時的 fallback） */
-	target?: string;
-	/** SUMMARIZE 的聚合清單（新格式，支援多組） */
-	aggregations?: SummarizeAggregation[];
-	tableName?: string;
-	joinType?: string;
-	leftKey?: string;
-	rightKey?: string;
-	outputColumn?: string;
-	expression?: string;
-	fileName?: string;
-	rowCount?: number;
-	columnCount?: number;
-	/** SELECT 要投影的欄位；空陣列 = 全選 */
-	columns?: string[];
-	/** UNION 的欄位對齊方式：BY_NAME（預設）/ POSITION */
-	unionMode?: string;
-	/** SAMPLE 的取樣列數 */
-	sampleSize?: number;
-	/** SAMPLE 的取樣方式：FIRST（預設）/ RANDOM */
-	sampleMode?: string;
-	/** RENAME 的改名清單 */
-	renames?: RenamePair[];
-	/** IMPUTE 補值方式 / RANK 排名方式 */
-	method?: string;
-	/** IMPUTE 的常數補值 */
-	fillValue?: string;
-	/** DATA_CLEANSING 的三個開關 */
-	trim?: boolean;
-	collapse?: boolean;
-	emptyToNull?: boolean;
-	/** CROSS_TAB */
-	pivotColumn?: string;
-	valueColumn?: string;
-	aggFunc?: string;
-	/** TRANSPOSE 的「名稱」欄位名 */
-	nameColumn?: string;
-	/** TEXT_TO_COLUMNS */
-	separator?: string;
-	outputColumns?: string[];
-	/** REGEX：MATCH | PARSE | REPLACE */
-	regexMode?: string;
-	pattern?: string;
-	replacement?: string;
-	caseInsensitive?: boolean;
-	/** MULTI_FIELD_FORMULA：OVERWRITE | NEW_FIELD */
-	outputMode?: string;
-	newFieldSuffix?: string;
-	/** TEXT_TO_COLUMNS：SEPARATOR（字面）| REGEX（樣式切分） */
-	splitMode?: string;
-	/** 視窗節點 */
-	partitionBy?: string[];
-	orderBy?: string;
-	descending?: boolean;
-	/** FIND_REPLACE */
-	findField?: string;
-	lookupField?: string;
-	replaceField?: string;
-	unmatched?: string;
-}
+// 對外重新匯出，維持既有 API（這三個名字原本都是從本檔 export 的）。
+export type { NodeConfig, SummarizeAggregation, RenamePair };
 
 /**
  * FILTER 節點的 false 分支表名後綴。

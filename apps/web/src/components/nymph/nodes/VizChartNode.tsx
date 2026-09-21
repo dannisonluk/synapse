@@ -3,14 +3,18 @@ import { Handle, Position, NodeProps, Node } from "@xyflow/react";
 import { PieChart, RefreshCw, BarChart3, LineChart, Gauge } from "lucide-react";
 import { ikaros } from "../../../engine/ikaros/client";
 import { useTheme } from "../../../theme/ThemeContext";
+import type { NodeConfig } from "../../../types/nodeConfig";
 
-type ChartType = "BAR" | "LINE" | "PIE" | "KPI";
+/**
+ * 圖表類型。
+ *
+ * 由 types/nodeConfig.ts 的形狀表推導，不再手抄一次這四個字串
+ * （這裡以前是本專案第四份 config 宣告）。
+ */
+export type ChartType = NonNullable<NodeConfig["chartType"]>;
 
-export interface VizChartConfig {
-	chartType?: ChartType;
-	xAxis?: string;
-	yAxis?: string;
-}
+/** 圖表節點只用到 config 的這三個欄位；其餘欄位與它無關。 */
+export type VizChartConfig = Pick<NodeConfig, "chartType" | "xAxis" | "yAxis">;
 
 interface VizChartNodeData extends Record<string, unknown> {
 	label?: string;

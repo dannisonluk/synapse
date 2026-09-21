@@ -20,90 +20,21 @@ import {
 	useUpstreamColumns,
 	type UpstreamColumn,
 } from "../../../hooks/useUpstreamColumns";
+import type {
+	NodeConfig,
+	SummarizeAggregation,
+	RenamePair,
+} from "../../../types/nodeConfig";
 
-/** SUMMARIZE 的一組聚合 */
-export interface SummarizeAgg {
-	func?: string;
-	target?: string;
-}
-
-/** RENAME 的一組改名 */
-export interface RenamePairConfig {
-	from?: string;
-	to?: string;
-}
-
-export interface AlteryxNodeConfig {
-	field?: string;
-	op?: string;
-	val?: string;
-	/**
-	 * SUMMARIZE 分組鍵。
-	 *   string[]   → 新格式，可多鍵；空陣列 = 不分组（整表聚合成一列）
-	 *   string     → 舊格式（也接受 "a, b"）
-	 */
-	groupBy?: string | string[];
-	/** 舊格式：單一聚合（aggregations 為空時的 fallback） */
-	func?: string;
-	target?: string;
-	/** SUMMARIZE 聚合清單（新格式，可多組） */
-	aggregations?: SummarizeAgg[];
-	tableName?: string;
-	joinType?: string;
-	leftKey?: string;
-	rightKey?: string;
-	outputColumn?: string;
-	expression?: string;
-	fileName?: string;
-	rowCount?: number;
-	columnCount?: number;
-	/** SELECT 節點要投影的欄位；空陣列 = 全選 */
-	columns?: string[];
-	/** UNION 欄位對齊方式：BY_NAME（預設）/ POSITION */
-	unionMode?: string;
-	/** SAMPLE 取樣列數 */
-	sampleSize?: number;
-	/** SAMPLE 取樣方式：FIRST（預設）/ RANDOM */
-	sampleMode?: string;
-	/** RENAME 改名清單 */
-	renames?: RenamePairConfig[];
-	/** IMPUTE 補值方式（CONSTANT / MEAN）／ RANK 排名方式（RANK / DENSE_RANK / ROW_NUMBER） */
-	method?: string;
-	/** IMPUTE 的常數補值 */
-	fillValue?: string;
-	/** DATA_CLEANSING 的三個開關 */
-	trim?: boolean;
-	collapse?: boolean;
-	emptyToNull?: boolean;
-	/** CROSS_TAB：展開欄位、取值欄位、聚合函數 */
-	pivotColumn?: string;
-	valueColumn?: string;
-	aggFunc?: string;
-	/** TRANSPOSE：unpivot 後存放原欄位名的欄位 */
-	nameColumn?: string;
-	/** TEXT_TO_COLUMNS：分隔符與切出來的欄位名 */
-	separator?: string;
-	outputColumns?: string[];
-	/** REGEX：MATCH | PARSE | REPLACE */
-	regexMode?: string;
-	pattern?: string;
-	replacement?: string;
-	caseInsensitive?: boolean;
-	/** MULTI_FIELD_FORMULA：OVERWRITE（就地改寫）| NEW_FIELD（新增欄位） */
-	outputMode?: string;
-	newFieldSuffix?: string;
-	/** TEXT_TO_COLUMNS：SEPARATOR（字面）| REGEX（樣式切分） */
-	splitMode?: string;
-	/** 視窗節點：分區鍵、排序鍵、是否遞減 */
-	partitionBy?: string[];
-	orderBy?: string;
-	descending?: boolean;
-	/** FIND_REPLACE：來源鍵、查找表鍵、取回的值欄位、未命中處理 */
-	findField?: string;
-	lookupField?: string;
-	replaceField?: string;
-	unmatched?: string;
-}
+// 節點 config 的形狀宣告在 types/nodeConfig.ts —— 那是唯一一份。
+// 本檔以前手抄了一份 AlteryxNodeConfig（與 types/workbench.ts 的 ASTNodeConfig、
+// engine/astCompiler.ts 的 NodeConfig 三份互不檢查），所以新增欄位要改三個地方。
+//
+// 以下三個是向後相容的別名 —— 這些名字過去都是從本檔 export 的，直接改名會動到呼叫端。
+// 這一輪只做「去重複」，不動任何呼叫端。
+export type AlteryxNodeConfig = NodeConfig;
+export type SummarizeAgg = SummarizeAggregation;
+export type RenamePairConfig = RenamePair;
 
 /** SUMMARIZE 可選的聚合函數（值必須在 sql.ts safeFunc 白名單內） */
 const AGG_FUNCS = [

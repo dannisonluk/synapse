@@ -36,80 +36,15 @@ export type AlteryxNodeType =
 	| "FIND_REPLACE"
 	| "VIZ_CHART";
 
-export interface ASTNodeConfig {
-	tableName?: string;
-	fileName?: string;
-	field?: string;
-	op?: string;
-	val?: string;
-	/** SUMMARIZE 分組鍵：舊格式 string，新格式 string[]（空陣列 = 不分组） */
-	groupBy?: string | string[];
-	/** 舊格式：單一聚合（aggregations 為空時的 fallback） */
-	func?: string;
-	target?: string;
-	/** SUMMARIZE 聚合清單（多組） */
-	aggregations?: { func?: string; target?: string }[];
-	outputColumn?: string;
-	expression?: string;
-	joinType?: string;
-	leftKey?: string;
-	rightKey?: string;
-	columns?: string[];
-	/** UNION 欄位對齊方式：BY_NAME（預設）/ POSITION */
-	unionMode?: "BY_NAME" | "POSITION";
-	/** SAMPLE 取樣列數 */
-	sampleSize?: number;
-	/** SAMPLE 取樣方式：FIRST（預設）/ RANDOM */
-	sampleMode?: "FIRST" | "RANDOM";
-	/** RENAME 改名清單 */
-	renames?: { from?: string; to?: string }[];
-	chartType?: "BAR" | "LINE" | "PIE" | "KPI";
-	xAxis?: string;
-	yAxis?: string;
-
-	// --- 以下為擴充節點（UNIQUE / IMPUTE / CROSS_TAB / 視窗函數 …）---
-	/** IMPUTE 補值方式（CONSTANT | MEAN）／ RANK 排名方式（RANK | DENSE_RANK | ROW_NUMBER） */
-	method?: string;
-	/** IMPUTE 的常數補值 */
-	fillValue?: string;
-	/** DATA_CLEANSING：去頭尾空白 / 壓縮內部連續空白 / 空字串轉 NULL */
-	trim?: boolean;
-	collapse?: boolean;
-	emptyToNull?: boolean;
-	/** CROSS_TAB：列轉欄的來源欄位、取值欄位 */
-	pivotColumn?: string;
-	valueColumn?: string;
-	/** CROSS_TAB 的聚合函數（SUM / AVG / COUNT / MIN / MAX / FIRST） */
-	aggFunc?: string;
-	/** TRANSPOSE：unpivot 後存放原欄位名的欄位 */
-	nameColumn?: string;
-	/** TEXT_TO_COLUMNS：分隔符與切出來的欄位名 */
-	separator?: string;
-	outputColumns?: string[];
-	/** REGEX：MATCH | PARSE | REPLACE */
-	regexMode?: string;
-	/** REGEX 樣式（RE2 / Rust regex 共同語法；忽略大小寫以 inline (?i) 表示） */
-	pattern?: string;
-	/** REGEX：REPLACE 的取代字串（支援 \1 反向參照） */
-	replacement?: string;
-	/** REGEX：是否忽略大小寫（摺進 pattern 的 (?i)） */
-	caseInsensitive?: boolean;
-	/** MULTI_FIELD_FORMULA：OVERWRITE（就地改寫）| NEW_FIELD（每個欄位多一個新欄位） */
-	outputMode?: string;
-	/** MULTI_FIELD_FORMULA：NEW_FIELD 模式的新欄位後綴（空字串會被退回 "_new"） */
-	newFieldSuffix?: string;
-	/** TEXT_TO_COLUMNS：SEPARATOR（字面分隔符）| REGEX（樣式切分） */
-	splitMode?: string;
-	/** 視窗節點：分區鍵、排序鍵、是否遞減 */
-	partitionBy?: string[];
-	orderBy?: string;
-	descending?: boolean;
-	/** FIND_REPLACE：來源鍵、查找表鍵、取回的值欄位、未命中時的處理 */
-	findField?: string;
-	lookupField?: string;
-	replaceField?: string;
-	unmatched?: string;
-}
+// 節點 config 的形狀宣告在 types/nodeConfig.ts —— 那是唯一一份。
+// 這裡只保留別名，因為歷史上這個名字（ASTNodeConfig）被 workflow JSON 那一側用過。
+//
+// 為什麼不直接把名字統一成 NodeConfig：
+//   三個名字（ASTNodeConfig / NodeConfig / AlteryxNodeConfig）過去各有一份手抄的
+//   介面，對外都 export 過。留別名可以讓「改名」與「去重複」兩件事分開做 ——
+//   這一輪只做去重複，不動任何呼叫端。
+export type { NodeConfig } from "./nodeConfig";
+export type ASTNodeConfig = import("./nodeConfig").NodeConfig;
 
 
 export interface SynapseASTNode {
