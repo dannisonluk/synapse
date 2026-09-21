@@ -293,6 +293,115 @@ check("SELECT creates its own output table",
 	sqlMod.generateSqlFromConfig(NODE, "SELECT", { columns: [] }, ["node_u"]),
 	`CREATE OR REPLACE TEMP TABLE "${NODE}" AS SELECT * FROM "node_u";`);
 
+// --- OUTPUT：一個「命名的終點」，不改資料 -----------------------------------
+// 它照樣建一張以自己 id 為名的表 —— 這是下載鈕的資料來源（見 AlteryxNode 的
+// OutputDownloadButton）。所以「下載到的」與「畫布上看到的」是同一份資料。
+check("OUTPUT is a plain passthrough of its upstream",
+	sqlMod.compileNodeSelect(NODE, "OUTPUT", {}, ["node_u"]),
+	'SELECT * FROM "node_u"');
+check("OUTPUT creates its own output table (the download button reads this)",
+	sqlMod.generateSqlFromConfig(NODE, "OUTPUT", {}, ["node_u"]),
+	`CREATE OR REPLACE TEMP TABLE "${NODE}" AS SELECT * FROM "node_u";`);
+check("outputTableFor(OUTPUT) returns the node id, not the upstream",
+	sqlMod.outputTableFor(NODE, "OUTPUT", []), NODE);
+check("OUTPUT falls back to raw_data with no upstream",
+	sqlMod.compileNodeSelect(NODE, "OUTPUT", {}, []), 'SELECT * FROM "raw_data"');
+// fileName / outputFormat 是「匯出與下載」的事，不該滲進 SQL。
+// 一旦滲進來，SQL 版與 Polars 版就會對「同一個 config」產生不同結構的表。
+check("OUTPUT ignores fileName / outputFormat at compile time",
+	sqlMod.compileNodeSelect(NODE, "OUTPUT", { fileName: "sales.csv", outputFormat: "JSON" }, ["node_u"]),
+	'SELECT * FROM "node_u"');
+check("OUTPUT needs no DuckDB extension", sqlMod.requiredExtensions("OUTPUT"), []);
+check("SPATIAL_MATCH is still the only node needing an extension",
+	sqlMod.requiredExtensions("SPATIAL_MATCH"), ["spatial"]);
+
+// ===========================================================================
+// 2b. csv.ts — OUTPUT 下載的序列化
+// ===========================================================================
+// CSV 的轉義寫錯不會有任何錯誤訊息 —— 症狀是「Excel 打開來欄位跑掉」。
+// 所以這一節逐條釘住轉義規則，而不是只測「有沒有輸出」。
+const csvMod = await loadTs("apps/web/src/engine/csv.ts");
+section("2b. csv.ts — OUTPUT 下載的序列化");
+
+/** 極簡 CSV parser（測試專用）：唯一目的是證明 toCsv 的輸出能被讀回來 */
+function parseCsv(text) {
+	const rows = [];
+	let row = [];
+	let cell = "";
+	let quoted = false;
+	for (let i = 0; i < text.length; i++) {
+		const ch = text[i];
+		if (quoted) {
+			if (ch === '"') {
+				if (text[i + 1] === '"') {
+					cell += '"';
+					i++;
+				} else {
+					quoted = false;
+				}
+			} else {
+				cell += ch;
+			}
+		} else if (ch === '"') {
+			quoted = true;
+		} else if (ch === ",") {
+			row.push(cell);
+			cell = "";
+		} else if (ch === "\r") {
+			// 交給 \n 收尾（CRLF 不該變成兩次換列）
+		} else if (ch === "\n") {
+			row.push(cell);
+			rows.push(row);
+			row = [];
+			cell = "";
+		} else {
+			cell += ch;
+		}
+	}
+	// 有結尾換行時最後一列已經收掉了；沒有結尾換行才要補收
+	if (cell !== "" || row.length > 0) {
+		row.push(cell);
+		rows.push(row);
+	}
+	return rows;
+}
+
+check("csvCell leaves a plain value alone", csvMod.csvCell("abc"), "abc");
+check("csvCell writes null as empty (not the string \"null\")", csvMod.csvCell(null), "");
+check("csvCell writes undefined as empty", csvMod.csvCell(undefined), "");
+check("csvCell quotes a value containing the delimiter", csvMod.csvCell("a,b"), '"a,b"');
+check("csvCell doubles an embedded quote", csvMod.csvCell('say "hi"'), '"say ""hi"""');
+check("csvCell quotes a value containing a newline", csvMod.csvCell("a\nb"), '"a\nb"');
+check("csvCell quotes a value containing a CR", csvMod.csvCell("a\rb"), '"a\rb"');
+check("csvCell stringifies numbers", csvMod.csvCell(42), "42");
+check("csvCell stringifies false (not as empty)", csvMod.csvCell(false), "false");
+
+// 真實 round-trip：寫出來的字串再解析一次，欄位數與值都要一致。
+// 這比逐條 csvCell 更強 —— 它驗的是「一整列」的組合行為（引號 + 內含換行）。
+{
+	const out = csvMod.toCsv(
+		[
+			{ name: "a,b", note: 'say "hi"' },
+			{ name: "line\nbreak", note: null },
+		],
+		["name", "note"],
+	);
+	check("toCsv emits a header, then a row per record (CRLF + trailing newline)",
+		out, 'name,note\r\n"a,b","say ""hi"""\r\n"line\nbreak",\r\n');
+	check("toCsv round-trips through a parser (a quoted newline stays one cell)",
+		parseCsv(out), [["name", "note"], ["a,b", 'say "hi"'], ["line\nbreak", ""]]);
+}
+check("toCsv takes the column order from the first row when not told",
+	csvMod.toCsv([{ b: 1, a: 2 }]), "b,a\r\n1,2\r\n");
+check("toCsv with no rows still emits the given header",
+	csvMod.toCsv([], ["a", "b"]), "a,b\r\n");
+check("toCsv with no rows and no columns is empty (no phantom blank line)",
+	csvMod.toCsv([]), "");
+check("toCsv escapes a header containing a comma",
+	csvMod.toCsv([{ "a,b": 1 }]), '"a,b"\r\n1\r\n');
+check("toCsv honours a custom delimiter",
+	csvMod.toCsv([{ a: 1, b: 2 }], ["a", "b"], "\t"), "a\tb\r\n1\t2\r\n");
+
 // ===========================================================================
 // 3. Hermes patch resolution
 // ===========================================================================
@@ -542,6 +651,27 @@ has("a spatial workflow exports a LOAD spatial preamble", spCte.sql, "LOAD spati
 check("...placed before the WITH (LOAD is a separate statement)",
 	spCte.sql.indexOf("LOAD spatial;") < spCte.sql.indexOf("WITH"), true);
 check("a non-spatial workflow exports no LOAD", cte.sql.includes("LOAD "), false);
+
+// OUTPUT：一個「命名的終點」。它跟 VIZ_CHART 相反 —— 不建立輸出表的節點會被
+// 跳過，而 OUTPUT 建立自己的表，所以會自然成為最終 SELECT 的來源。
+// 這正是「下載到的 == 匯出的」的機制：兩邊讀的是同一張表。
+{
+	const outCte = exporter.exportToSqlCte(
+		[
+			mk("node_i", { label: "I", type: "INPUT_DUCKDB", config: { fileName: "raw.csv", tableName: "raw_data" } }),
+			mk("node_o", { label: "O", type: "OUTPUT", config: { fileName: "sales.csv", outputFormat: "CSV" } }),
+		],
+		[{ id: "e1", source: "node_i", target: "node_o" }],
+	);
+	check("OUTPUT is not skipped in the CTE export (unlike VIZ_CHART)", outCte.skipped, []);
+	has("OUTPUT gets its own CTE", outCte.sql, '"node_o" AS (');
+	has("...whose body is a passthrough of the upstream", outCte.sql, 'SELECT * FROM "node_i"');
+	has("...and the final SELECT reads the OUTPUT node", outCte.sql, 'SELECT * FROM "node_o";');
+	check("the OUTPUT filename never leaks into the SQL",
+		outCte.sql.includes("sales.csv"), false);
+	check("the OUTPUT format never leaks into the SQL either",
+		outCte.sql.includes("CSV"), false);
+}
 
 // raw SQL 節點（使用者自己寫的，沒有 data.type）
 {
@@ -1238,6 +1368,49 @@ section("8. exportPolars.ts — Python / Polars 腳本匯出");
 		spPolars.script.includes("pl.DataFrame()"), true);
 	check("...and never emits a passthrough of the left frame",
 		/^node_x = raw_data\s*$/m.test(spPolars.script), false);
+
+	// --- OUTPUT：全專案唯一一個「Polars 端比 DuckDB 端更完整」的節點 ---
+	// DuckDB 那條路在瀏覽器裡，沒有檔案系統 —— 它的「輸出」只能是記憶體裡的
+	// 一張表加一個前端下載鈕。真正落地寫檔發生在匯出的 Python 腳本裡。
+	// 這個不對稱要寫在註解與 note 裡，而不是假裝兩邊一樣。
+	has("OUTPUT CSV maps to write_csv",
+		one("OUTPUT", { fileName: "sales.csv", outputFormat: "CSV" }),
+		'write_csv("sales.csv")');
+	has("OUTPUT JSON maps to write_json",
+		one("OUTPUT", { fileName: "sales.json", outputFormat: "JSON" }),
+		'write_json("sales.json")');
+	// 「.csv 檔裝 JSON 內容」是那種「開得起來但讀不到」的錯 → 副檔名一律跟著格式
+	check("OUTPUT never writes .csv when the format is JSON",
+		one("OUTPUT", { fileName: "sales.csv", outputFormat: "JSON" }).includes('write_csv("sales.csv")'),
+		false);
+	has("...the extension is forced to follow the format instead",
+		one("OUTPUT", { fileName: "sales.csv", outputFormat: "JSON" }),
+		'write_json("sales.json")');
+	// 檔名會被寫進 Python 字面值，也會變成瀏覽器下載的檔名 → 必須擋路徑穿越
+	has("OUTPUT strips a path traversal from the filename",
+		one("OUTPUT", { fileName: "../../etc/passwd.csv", outputFormat: "CSV" }),
+		'write_csv("passwd.csv")');
+	has("OUTPUT strips a Windows path from the filename",
+		one("OUTPUT", { fileName: "C:\\tmp\\out.csv", outputFormat: "CSV" }),
+		'write_csv("out.csv")');
+	check("OUTPUT never emits the raw filename",
+		one("OUTPUT", { fileName: "../../etc/passwd.csv", outputFormat: "CSV" }).includes("../../"),
+		false);
+	has("an unknown OUTPUT format falls back to CSV",
+		one("OUTPUT", { fileName: "x", outputFormat: "PARQUET" }),
+		'write_csv("x.csv")');
+	has("an empty OUTPUT filename falls back to output.csv",
+		one("OUTPUT", {}), 'write_csv("output.csv")');
+	check("OUTPUT is translatable, so it is not reported for review",
+		oneRes("OUTPUT", { fileName: "a.csv" }).needsReview, []);
+	// notes 不是回傳值 —— 它們被寫進腳本的「翻譯備註」區塊（比照既有斷言的做法）。
+	// 這條守的是「不對稱要被說出來」：DuckDB 那條路沒有寫檔行為。
+	has("...and the script says DuckDB has no equivalent (the asymmetry is documented)",
+		one("OUTPUT", { fileName: "a.csv" }), "會寫出檔案 a.csv（CSV）");
+	has("...naming the download button as the DuckDB-side equivalent",
+		one("OUTPUT", { fileName: "a.csv" }), "畫布上的下載鈕");
+	has("...the emitted line names the file for the reader",
+		one("OUTPUT", { fileName: "sales.csv" }), "匯出 → sales.csv");
 
 	// --- 產生的腳本必須是合法的 Python（用 CPython 真的編譯一次）---
 	// 字串比對只能證明「看起來像 Python」。這裡真的交給 CPython 檢查語法。

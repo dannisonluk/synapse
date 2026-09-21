@@ -1519,17 +1519,32 @@ export async function runDuckDbWasmChecks(root, loadTs, fallbackPipelines = []) 
 	const manyInput = catalogTypes.filter((t) => catalog.NODE_CATALOG[t].inputs === -1);
 	add("catalog declares exactly the unbounded-input nodes", manyInput.sort(), ["UNION"]);
 
-	// 14d. 每個 config 欄位都必須真的被編譯器讀到
-	//      （防「目錄寫了欄位、但編譯器根本沒用它」的半套實作）
+	// 14d. 每個 config 欄位都必須真的被「某個消費端」讀到
+	//      （防「目錄寫了欄位、但根本沒人用它」的半套實作）
+	//
+	// 消費端有兩個：SQL 編譯器，以及 Polars 匯出器。
+	// 只看編譯器會誤判 OUTPUT —— 它的 fileName / outputFormat 刻意不影響 SQL
+	// （那是「輸出 / 下載」的事，見 verify.mjs §2 的斷言），但 Polars 匯出器
+	// 真的拿它來決定 write_csv / write_json 與檔名。兩個都不讀才是死欄位。
 	//
 	// enum 要餵「合法的另一個值」，不能餵亂字串 —— 餵亂字串會被白名單擋掉、
 	// 退回預設值，於是產出的 SQL 與預設相同，看起來像「沒讀 config」，
 	// 其實是探針本身沒有真的改變輸入（UNION 就踩過這個坑）。
+	const polarsMod = await loadTs("apps/web/src/engine/exportPolars.ts");
+	const polarsScriptFor = (type, config) => {
+		const res = polarsMod.exportToPolars(
+			[{ id: "probe_node", type: "alteryxNode", position: { x: 0, y: 0 }, data: { label: type, type, config } }],
+			[],
+		);
+		return res ? res.script : "";
+	};
+
 	const unusedFields = [];
 	for (const t of catalogTypes) {
 		const spec = catalog.NODE_CATALOG[t];
 		if (spec.fields.length === 0) continue;
-		// VIZ_CHART 是純檢視節點：它的 config 決定圖表怎麼畫，不影響 SQL。
+		// VIZ_CHART 是純檢視節點：它的 config 決定圖表怎麼畫，不影響 SQL，
+		// 也不進 Polars 匯出（它不產生資料）。
 		if (t === "VIZ_CHART") continue;
 
 		const probeConfig = {};
@@ -1566,7 +1581,11 @@ export async function runDuckDbWasmChecks(root, loadTs, fallbackPipelines = []) 
 		}
 		const withConfig = compiler.compileNodeSelect("probe_node", t, probeConfig, probeUpstream);
 		const bare = compiler.compileNodeSelect("probe_node", t, {}, probeUpstream);
-		if (withConfig === bare) unusedFields.push(t);
+		if (withConfig !== bare) continue;
+
+		// SQL 沒變 → 再問 Polars 匯出器。它讀到了就不算死欄位。
+		if (polarsScriptFor(t, probeConfig) !== polarsScriptFor(t, {})) continue;
+		unusedFields.push(t);
 	}
 	add("every node type actually reads at least one of its declared config fields",
 		unusedFields, []);
