@@ -1796,6 +1796,54 @@ section("11. repo 一致性 — 衍生產物、設定檔、死程式碼");
 	check("an ESLint config exists", existsSync(join(ROOT, ".eslintrc.cjs")), true);
 	check("eslint is declared as a devDependency",
 		typeof rootPkg.devDependencies?.eslint, "string");
+
+	// --- 11k. config 形狀只能有一份宣告（types/nodeConfig.ts）---
+	// 這以前是本專案最貴的一種漂移：同一個 config 形狀被手抄了四份
+	//   types/workbench.ts 的 ASTNodeConfig、engine/astCompiler.ts 的 NodeConfig、
+	//   AlteryxNode.tsx 的 AlteryxNodeConfig、VizChartNode.tsx 的 VizChartConfig
+	// 四份互不引用，所以新增一個欄位要改四個地方。加 TEXT_TO_COLUMNS 的
+	// splitMode 那一輪，光是 TS2339 就出現 10 次 —— 而且那還是「有編譯」的
+	// 情況；漏改編譯器那一份的話，是 tsc 全綠但節點靜靜地不做事。
+	//
+	// 現在四份都收斂成 types/nodeConfig.ts 的別名。這兩條守住它不再長回來。
+	const cfgMod = await loadTs("apps/web/src/types/nodeConfig.ts");
+	const configKeys = new Set(cfgMod.NODE_CONFIG_KEYS);
+	check("the shared NodeConfig exposes a non-empty key list (so the check is not vacuous)",
+		cfgMod.NODE_CONFIG_KEYS.length > 0, true);
+	check("NODE_CONFIG_KEYS has no duplicate entries",
+		cfgMod.NODE_CONFIG_KEYS.length, configKeys.size);
+
+	// 雙向對齊：目錄是「有哪些欄位」的真相，NodeConfig 是「形狀」的真相。
+	const catalogueFields = new Set();
+	for (const spec of Object.values(catalog.NODE_CATALOG)) {
+		for (const f of spec.fields) catalogueFields.add(f.name);
+	}
+	check("the catalogue declares at least one config field (so the check is not vacuous)",
+		catalogueFields.size > 0, true);
+	check("every catalogued config field exists on the shared NodeConfig",
+		[...catalogueFields].filter((f) => !configKeys.has(f)).sort(), []);
+
+	// 反向：NodeConfig 不該有目錄從沒提過的鍵。三個例外都是刻意的：
+	//   func              → SUMMARIZE 舊格式的單一聚合，編譯器必須繼續吃舊 workflow
+	//   rowCount/columnCount → UI 註冊本機檔案後寫進去的顯示用統計，非使用者可編輯
+	// 寫成「必須剛好等於這三個」而不是「必須是子集」，是為了讓**新增**一個
+	// 沒人用的欄位也會紅燈 —— 否則這裡會慢慢累積垃圾。
+	const KEYS_NOT_IN_CATALOGUE = ["columnCount", "func", "rowCount"];
+	check("the shared NodeConfig declares no key the catalogue never mentions",
+		[...configKeys].filter((k) => !catalogueFields.has(k)).sort(),
+		KEYS_NOT_IN_CATALOGUE);
+
+	// 而且它們必須真的是別名 —— 有人把 interface 抄回來就會紅燈。
+	const redeclarations = [
+		["apps/web/src/types/workbench.ts", /export interface ASTNodeConfig\b/],
+		["apps/web/src/engine/astCompiler.ts", /export interface NodeConfig\b/],
+		["apps/web/src/components/nymph/nodes/AlteryxNode.tsx", /export interface AlteryxNodeConfig\b/],
+		["apps/web/src/components/nymph/nodes/VizChartNode.tsx", /export interface VizChartConfig\b/],
+	]
+		.filter(([rel, re]) => re.test(readFileSync(join(ROOT, rel), "utf8")))
+		.map(([rel]) => rel);
+	check("no module re-declares the node config shape (it must stay an alias)",
+		redeclarations, []);
 }
 
 // ===========================================================================
