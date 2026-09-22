@@ -2655,6 +2655,54 @@ section("11. repo 一致性 — 衍生產物、設定檔、死程式碼");
 		redeclarations, []);
 }
 
+// ---------------------------------------------------------------------------
+// 11x. 「接線真的存在」—— 一個只有模組的功能不算功能
+// ---------------------------------------------------------------------------
+// 這一段守的是一整類問題：引擎模組寫好了、測試也綠了，但它**從來沒有被呼叫**。
+// 單元測試測不到這個 —— 它測的是「模組對不對」，不是「有沒有人用它」。
+// 所以直接掃原始碼，確認關鍵呼叫點存在。
+{
+	const read = (rel) => readFileSync(join(ROOT, rel), "utf8");
+	const canvasSrc = read("apps/web/src/components/nymph/NymphCanvas.tsx");
+	const clientSrc = read("apps/web/src/engine/ikaros/client.ts");
+	const schedSrc = read("apps/web/src/engine/scheduler.ts");
+	const drawerSrc = read("apps/web/src/components/workbench/DataDrawer.tsx");
+
+	// --- 執行快取 ---
+	has("the canvas actually consults the execution cache", canvasSrc, "decideReuse(");
+	has("...and records the key of a successful run", canvasSrc, "keyBookRef.current.record(");
+	// 失敗**不記鍵**：一次失敗被永久沿用的話，使用者會怎麼修都還是同一個錯
+	has("...and forgets the key on failure (a failure must never be cached)",
+		canvasSrc, "keyBookRef.current.forget(");
+	has("...and prunes keys for deleted nodes", canvasSrc, "keyBookRef.current.retain(");
+	has("...and reads the data version", canvasSrc, "dataVersion.current");
+	// 版本號的**來源**：檔案註冊時遞增。少了這一句，快取會在重新上傳後餵出舊資料。
+	has("registering a file bumps the data version", clientSrc, "dataVersion.bump()");
+	// 快取命中必須看得見，否則使用者以為資料是新的
+	has("the exec log has a SKIP level", schedSrc, '"SKIP"');
+	has("...and the drawer colours it distinctly from INFO", drawerSrc, 'case "SKIP":');
+	has("...and the run reports how many nodes were reused", canvasSrc, "沿用上次結果");
+
+	// --- Undo / Redo ---
+	has("the canvas keeps a history", canvasSrc, "new History<");
+	has("...and pushes on config edits", canvasSrc, "recordHistory({ nodes: nextNodes");
+	has("...and on structural node changes", canvasSrc, "applyNodeChanges(changes, nodesRef.current)");
+	has("...and on edge removal", canvasSrc, "applyEdgeChanges(changes, edgesRef.current)");
+	has("...and the keyboard drives undo", canvasSrc, '"z"');
+	has("...and undo is reachable by button too", canvasSrc, "onClick={handleUndo}");
+
+	// --- 命令面板 ---
+	has("the palette is rendered", canvasSrc, "<CommandPalette");
+	has("...and its candidates come from the catalogue", canvasSrc, "Object.values(NODE_CATALOG)");
+	has("...and picking a node creates it", canvasSrc, "handlePickNodeType");
+	has("...and actions dispatch to the existing handlers", canvasSrc, "handlePaletteAction");
+	has("...and the search/rank logic is the engine module", canvasSrc, "rankNodeTypes");
+	has("...and there is a mouse path to open it", canvasSrc, "setPaletteOpen(true)");
+
+	// 反向：這些關鍵呼叫點若被刪掉，上面的斷言會紅；但也要確認掃描不是空的。
+	check("the wiring scan read a non-trivial file", canvasSrc.length > 10000, true);
+}
+
 // ===========================================================================
 // 12. harness 自身的一致性
 // ===========================================================================
