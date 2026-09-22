@@ -394,6 +394,10 @@ Two habits follow from this, and they apply to any harness built this way:
 
 ## 7. Known Limitations / Roadmap
 
+> A detailed proposal for what to build next — with purpose, use cases, implementation
+> notes, difficulty, and whether each item can be held by the existing harness — lives in
+> [`doc/ROADMAP.md`](doc/ROADMAP.md). This section stays the short list.
+
 **Not yet implemented**
 * **Python code export** — DONE (Polars); see suite 8. Pandas emission is not offered. `serializeArrowTable` / `parseArrowBuffer` in `@synapse/ikaros-arrow` remain unused.
 * **Alteryx tool coverage** — the sixteen tools listed in §6 are done. Fuzzy matching (`FUZZY_JOIN`), `SPATIAL_MATCH` and the `OUTPUT` writer have since landed too, so the only remaining gap is the `IN_DB` writer (writing *back* into a database, which needs a connection the browser-only engine does not have). Adding one is now a catalogue entry plus a compiler case plus an emitter — the palette, the config-form field list, the Hermes prompt and the drift guards all follow automatically.
