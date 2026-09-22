@@ -10,6 +10,12 @@ import {
 } from "lucide-react";
 import { useTheme } from "../../theme/ThemeContext";
 import { ikaros, type ColumnInfo } from "../../engine/ikaros/client";
+import {
+	buildProfileQuery,
+	parseProfileRow,
+	nullRatio,
+	type TableProfile,
+} from "../../engine/profile";
 import { ExecLogEntry } from "../../engine/scheduler";
 import { InspectedNodePayload } from "../nymph/NymphCanvas";
 
@@ -67,6 +73,17 @@ export const DataDrawer: React.FC<DataDrawerProps> = ({
 	const [loading, setLoading] = useState(false);
 	const [error, setError] = useState<string | null>(null);
 
+	/**
+	 * 剖面結果。
+	 *
+	 * **刻意放元件 state，不放節點 config**：config 是「驅動 SQL 的形狀」，
+	 * 會被寫進 workflow 存檔、會進執行快取的鍵。剖面是衍生事實，寫進去會污染
+	 * 存檔、讓快取永遠不命中，而且會隨檔案一起傳給別人。
+	 */
+	const [profile, setProfile] = useState<TableProfile | null>(null);
+	const [profiling, setProfiling] = useState(false);
+	const [profileError, setProfileError] = useState<string | null>(null);
+
 	/** 每次檢視新節點 → 重設分頁 / 搜尋（render 期間同步，避免多跑一次 fetch） */
 	const [seenPayload, setSeenPayload] = useState(payload);
 	if (payload !== seenPayload) {
@@ -88,6 +105,43 @@ export const DataDrawer: React.FC<DataDrawerProps> = ({
 		}, 300);
 		return () => clearTimeout(timer);
 	}, [searchInput]);
+
+	/**
+	 * 換一張表就把剖面清掉。
+	 *
+	 * 不清的話畫面會留著**上一張表**的數字，而下拉的標題已經是新表 ——
+	 * 那比空白更糟：它看起來有資料，但資料是別人的。
+	 */
+	useEffect(() => {
+		setProfile(null);
+		setProfileError(null);
+	}, [tableName]);
+
+	/**
+	 * 跑剖面。
+	 *
+	 * 必須由**使用者主動觸發**，不能自動跑：這是每欄一次全表掃描，
+	 * COUNT(DISTINCT) 尤其貴。自動跑等於每次點節點都多付一次全掃描。
+	 */
+	const runProfile = async () => {
+		if (!tableName || profiling) return;
+		setProfiling(true);
+		setProfileError(null);
+		try {
+			// 用引擎的 schema，不是畫面上的 columns —— 分頁查詢可能還沒回來，
+			// 那時候 columns 是空的，剖面就會只算到 COUNT(*)。
+			const cols = await ikaros.describe(tableName);
+			const q = buildProfileQuery(tableName, cols);
+			// maxRows = 1：這是單列聚合查詢，不必讓引擎準備更多
+			const res = await ikaros.query(q.sql, 1);
+			setProfile(parseProfileRow(res[0], q, cols));
+		} catch (err: any) {
+			setProfile(null);
+			setProfileError(err?.message || String(err));
+		} finally {
+			setProfiling(false);
+		}
+	};
 
 	/**
 	 * SQL 側分頁查詢。
@@ -276,6 +330,19 @@ export const DataDrawer: React.FC<DataDrawerProps> = ({
 									}}
 									className="flex-1 px-2 py-1 rounded border text-[10px] focus:outline-none"
 								/>
+								<button
+									onClick={runProfile}
+									disabled={profiling}
+									title="對每個欄位算 NULL 數、唯一值數與值域。這是每欄一次全表掃描，所以刻意做成手動觸發。"
+									style={{
+										backgroundColor: tokens.bgCard,
+										borderColor: tokens.border,
+										color: tokens.textPrimary,
+									}}
+									className="shrink-0 px-2 py-1 rounded border text-[10px] hover:opacity-80 disabled:opacity-40"
+								>
+									{profiling ? "profiling…" : "Profile"}
+								</button>
 							</div>
 						)}
 
@@ -291,6 +358,104 @@ export const DataDrawer: React.FC<DataDrawerProps> = ({
 								: ""}
 						</span>
 					</div>
+
+					{/* 剖面結果。放在分頁列與資料區之間，不動下面那串三元式。 */}
+					{tab === "data" && profileError && (
+						<div className="mb-1 px-2 py-1 rounded border border-rose-500/40 text-[10px] text-rose-400 break-all">
+							剖面失敗：{profileError}
+						</div>
+					)}
+					{tab === "data" && profile && (
+						<div
+							className="mb-1 max-h-[150px] overflow-auto rounded border"
+							style={{
+								borderColor: tokens.border,
+								backgroundColor: surfaceBg,
+							}}
+						>
+							<table className="w-full text-left border-collapse text-[10px]">
+								<thead>
+									<tr
+										className="border-b"
+										style={{ borderColor: tokens.border }}
+									>
+										{["欄位", "型別", "NULL", "唯一值", "最小", "最大"].map((h) => (
+											<th
+												key={h}
+												className="px-2 py-1 font-bold whitespace-nowrap"
+												style={{ color: tokens.textSecondary }}
+											>
+												{h}
+											</th>
+										))}
+									</tr>
+								</thead>
+								<tbody>
+									{profile.columns.map((c) => {
+										const ratio = nullRatio(c, profile.rows);
+										return (
+											<tr
+												key={c.name}
+												className="border-b"
+												style={{ borderColor: tokens.border }}
+											>
+												<td
+													className="px-2 py-1 font-mono whitespace-nowrap"
+													style={{ color: tokens.textPrimary }}
+												>
+													{c.name}
+												</td>
+												<td
+													className="px-2 py-1 whitespace-nowrap opacity-70"
+													style={{ color: tokens.textSecondary }}
+												>
+													{c.type}
+												</td>
+												<td
+													className="px-2 py-1 whitespace-nowrap"
+													style={{ color: tokens.textPrimary }}
+												>
+													{c.nulls ?? "—"}
+													{/* 空表時 nullRatio 回 null → 不顯示比例。
+													    顯示 0% 會把「空表」說成「沒有 NULL」。 */}
+													{ratio !== null
+														? ` (${(ratio * 100).toFixed(1)}%)`
+														: ""}
+												</td>
+												<td
+													className="px-2 py-1 whitespace-nowrap"
+													style={{ color: tokens.textSecondary }}
+												>
+													{c.distinct ?? "—"}
+												</td>
+												<td
+													className="px-2 py-1 font-mono max-w-[160px] truncate"
+													style={{ color: tokens.textSecondary }}
+													title={c.min ?? ""}
+												>
+													{c.min ?? "—"}
+												</td>
+												<td
+													className="px-2 py-1 font-mono max-w-[160px] truncate"
+													style={{ color: tokens.textSecondary }}
+													title={c.max ?? ""}
+												>
+													{c.max ?? "—"}
+												</td>
+											</tr>
+										);
+									})}
+								</tbody>
+							</table>
+							<div
+								className="px-2 py-1 text-[9px] opacity-60"
+								style={{ color: tokens.textSecondary }}
+							>
+								{profile.rows.toLocaleString()} 列。「唯一值」走精確的
+								COUNT(DISTINCT) —— 基數很高的欄位會慢，這正是它需要手動觸發的原因。
+							</div>
+						</div>
+					)}
 
 					{tab === "data" ? (
 						error ? (
