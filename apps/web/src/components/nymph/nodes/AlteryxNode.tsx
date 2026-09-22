@@ -12,9 +12,13 @@ import {
 	Combine,
 	Rows3,
 	CaseSensitive,
+	Gauge,
 } from "lucide-react";
 import { useTheme } from "../../../theme/ThemeContext";
 import { ikaros } from "../../../engine/ikaros/client";
+// 只為了拿「這個節點真正會跑的語句清單」—— EXPLAIN 需要單一語句，
+// 而自己用 `;` 切字串會被字面值裡的 `;` 騙到。編譯器是唯一可靠來源。
+import { compileNodeStatements } from "../../../engine/astCompiler";
 import {
 	qi,
 	hasCurrentField,
@@ -320,6 +324,48 @@ export const AlteryxNode: React.FC<NodeProps<Node<AlteryxNodeData>>> = ({
 	const [showSqlPreview, setShowSqlPreview] = useState(false);
 	const [config, setConfig] = useState<AlteryxNodeConfig>(data.config || {});
 	const [previewRows, setPreviewRows] = useState<any[]>([]);
+
+	/**
+	 * 執行計畫（EXPLAIN）。
+	 *
+	 * **只顯示、不解析**：EXPLAIN 的文字格式在不同 DuckDB 版本之間會變，
+	 * 任何依賴 plan 文字結構的功能（例如自己抽「哪個節點最貴」）都是未來的維護債。
+	 *
+	 * 它同時順手回答了另一個問題：「這個節點的查詢合法嗎」—— EXPLAIN 會走完整的
+	 * binder 與 planner，所以語意錯誤在這裡就會現形，不必真的執行。
+	 */
+	const [showPlan, setShowPlan] = useState(false);
+	const [plan, setPlan] = useState<string | null>(null);
+	const [planError, setPlanError] = useState<string | null>(null);
+
+	/** 抓執行計畫。按下去才跑 —— 不在每次 config 變更時跑。 */
+	const loadPlan = async () => {
+		setPlanError(null);
+		try {
+			// 用編譯器的語句清單，不要自己切 `;`：字面值裡可能有分號
+			// （`WHERE name = 'a;b'`），切錯會產生一個殘缺的 SQL。
+			const statements = compileNodeStatements(
+				id,
+				nodeType,
+				config,
+				data.upstreamTables || [],
+			);
+			// EXPLAIN 只吃單一語句。取**最後**一條 —— 那是產生輸出表的那條
+			// （FILTER 的 false 分支、ASSERT 的守門都排在後面）。
+			const single = statements[statements.length - 1];
+			if (!single) {
+				setPlan(null);
+				setPlanError("這個節點沒有可解釋的語句");
+				return;
+			}
+			const rows = await ikaros.query(`EXPLAIN ${single}`, 500);
+			// plan 是單欄多列的文字；併成一段給 <code> 顯示
+			setPlan(rows.map((r) => Object.values(r).join(" ")).join("\n"));
+		} catch (err: any) {
+			setPlan(null);
+			setPlanError(err?.message || String(err));
+		}
+	};
 
 	/**
 	 * 上游表的真實欄位。refreshKey 傳 sqlQuery：上游 SQL 一改（例如 FORMULA
@@ -637,6 +683,7 @@ export const AlteryxNode: React.FC<NodeProps<Node<AlteryxNodeData>>> = ({
 				</div>
 				<button
 					onClick={() => setShowSqlPreview(!showSqlPreview)}
+					title="顯示這個節點編譯出來的 SQL"
 					className={`p-1 rounded ${
 						isLight
 							? "hover:bg-stone-100 text-stone-400"
@@ -644,6 +691,22 @@ export const AlteryxNode: React.FC<NodeProps<Node<AlteryxNodeData>>> = ({
 					}`}
 				>
 					<Code className="w-3.5 h-3.5" />
+				</button>
+				<button
+					onClick={() => {
+						// 開的時候順便抓一次計畫；關的時候保留結果，下次開啟不必重跑
+						const next = !showPlan;
+						setShowPlan(next);
+						if (next && plan === null) void loadPlan();
+					}}
+					title="顯示執行計畫（EXPLAIN）。只做顯示不做解析 —— plan 的文字格式會隨版本改變。"
+					className={`p-1 rounded ${
+						isLight
+							? "hover:bg-stone-100 text-stone-400"
+							: "hover:bg-slate-800 text-slate-500"
+					}`}
+				>
+					<Gauge className="w-3.5 h-3.5" />
 				</button>
 			</div>
 
@@ -2624,6 +2687,25 @@ export const AlteryxNode: React.FC<NodeProps<Node<AlteryxNodeData>>> = ({
 						}`}
 					>
 						<code>{data.sqlQuery}</code>
+					</div>
+				)}
+
+				{/* 執行計畫。只顯示不解析 —— 見 loadPlan 的註解。 */}
+				{showPlan && (
+					<div
+						className={`p-2 rounded font-mono text-[9px] border whitespace-pre overflow-auto max-h-40 ${
+							isLight
+								? "bg-stone-900 text-stone-200 border-stone-800"
+								: "bg-slate-950 text-slate-400 border-slate-800"
+						}`}
+					>
+						{planError ? (
+							<span className="text-rose-400">{planError}</span>
+						) : plan ? (
+							<code>{plan}</code>
+						) : (
+							<span className="opacity-50">讀取計畫中…</span>
+						)}
 					</div>
 				)}
 			</div>
