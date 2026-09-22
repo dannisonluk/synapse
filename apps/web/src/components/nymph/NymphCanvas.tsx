@@ -2,6 +2,7 @@ import React, {
 	useEffect,
 	useState,
 	useCallback,
+	useMemo,
 	useRef,
 } from "react";
 import {
@@ -11,9 +12,13 @@ import {
 	useNodesState,
 	useEdgesState,
 	addEdge,
+	applyNodeChanges,
+	applyEdgeChanges,
 	Connection,
 	Edge,
+	EdgeChange,
 	Node,
+	NodeChange,
 	ReactFlowProvider,
 	useReactFlow,
 } from "@xyflow/react";
@@ -26,12 +31,18 @@ import {
 	FileCode,
 	Loader2,
 	FilePlus,
+	Undo2,
+	Redo2,
+	Command,
 } from "lucide-react";
 import { SqlNode } from "./nodes/SqlNode";
 import { ParticleEdge } from "./edges/ParticleEdge";
 import { AlteryxNode } from "./nodes/AlteryxNode";
 import { VizChartNode } from "./nodes/VizChartNode";
 import { withNodeBoundary } from "../ErrorBoundary";
+import { CommandPalette } from "../workbench/CommandPalette";
+// 命令面板的候選直接來自目錄 —— 它本來就是「有哪些節點」的唯一真相。
+import { NODE_CATALOG, defaultConfigFor } from "../../engine/nodeCatalog";
 import { ikaros } from "../../engine/ikaros/client";
 import {
 	generateSqlFromConfig,
@@ -47,6 +58,14 @@ import {
 } from "../../engine/exporter";
 import { exportToPolars } from "../../engine/exportPolars";
 import { downloadText } from "../../lib/download";
+import {
+	NodeKeyBook,
+	cacheKey,
+	decideReuse,
+	dataVersion,
+} from "../../engine/cache";
+import { History } from "../../engine/history";
+import { rankActions, rankNodeTypes } from "../../engine/palette";
 import { getLayoutedElements } from "../../engine/autoLayout";
 import { resolveAstPatch, toFlowEdges } from "../../engine/patch";
 import {
@@ -198,6 +217,32 @@ const CanvasInner: React.FC<NymphCanvasProps> = ({
 	const fileInputRef = useRef<HTMLInputElement>(null);
 
 	// ---------------------------------------------------------------------
+	// 執行快取與 Undo/Redo 的狀態
+	// ---------------------------------------------------------------------
+	// 兩者都放 ref 而不是 state：它們是「執行 / 編輯的歷史」，不是畫面的一部分。
+	// 放 state 會讓每一次 undo 或每一次快取命中都觸發重繪，而畫面完全沒變。
+	//
+	// keyBook 只記「上次跑成功的鍵」—— 結果本身就在 DuckDB 的表裡，不必再存一份。
+	const keyBookRef = useRef(new NodeKeyBook());
+	// 50 步、400ms 合併窗。合併窗的意義：表單每打一個字都會觸發 onChangeConfig，
+	// 不合併的話打十個字就有十步 undo。
+	const historyRef = useRef(new History<{ nodes: Node[]; edges: Edge[] }>({
+		limit: 50,
+		coalesceMs: 400,
+	}));
+	// 套用 undo/redo 時要抑制「因為 nodes 變了而再落一筆歷史」的遞迴
+	const applyingHistoryRef = useRef(false);
+	const [histVersion, setHistVersion] = useState(0);
+
+	// nodes / edges 的最新值。
+	//
+	// 為什麼需要：落一筆歷史必須知道「變更後」的完整圖，而 setState 的
+	// functional updater 裡不能呼叫 setState（updater 必須是純函式）。
+	// 用 ref 讀當前值，就能在外面先把新陣列算出來，再同時交給 setNodes 與歷史。
+	const nodesRef = useRef<Node[]>([]);
+	const edgesRef = useRef<Edge[]>([]);
+
+	// ---------------------------------------------------------------------
 	// 執行互斥鎖（execution mutex）
 	// ---------------------------------------------------------------------
 	// 連續點擊兩個節點原本會產生兩個並行的 runGraph，對同一批 DuckDB 臨時表
@@ -260,6 +305,25 @@ const CanvasInner: React.FC<NymphCanvasProps> = ({
 		},
 	]);
 	const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([]);
+
+	// nodesRef / edgesRef 是「最新值」的鏡子，給需要在 setState 之外讀圖的地方用
+	// （落歷史、config 變更時重算上游）。沒有這個 effect，它們永遠是空的。
+	useEffect(() => {
+		nodesRef.current = nodes;
+		edgesRef.current = edges;
+	}, [nodes, edges]);
+
+	// 首次掛載建立歷史的起點。用 reset 而不是 push：開啟一個工作流不是一次編輯，
+	// 使用者不該能 undo 到「什麼都沒有的空白畫布」。
+	const historySeededRef = useRef(false);
+	useEffect(() => {
+		if (historySeededRef.current) return;
+		historySeededRef.current = true;
+		historyRef.current.reset({ nodes, edges });
+		setHistVersion((v) => v + 1);
+		// 只在掛載時跑一次 —— 之後由明確的編輯動作落筆
+		// eslint-disable-next-line react-hooks/exhaustive-deps
+	}, []);
 
 	// 畫布狀態變更 → 節流後回報父層（Hermes 需要真實 current_dag）
 	useEffect(() => {
@@ -398,6 +462,20 @@ const CanvasInner: React.FC<NymphCanvasProps> = ({
 			// ok 最後由「有沒有未修復的失敗」+「有沒有節點被跳過」一起決定。
 			let skipped = 0;
 
+			// 執行快取：先把現存的表撈一次，之後在記憶體裡判斷 ——
+			// 每個節點各問一次引擎太貴，而這份清單在一次執行內不會變。
+			// 撈不到就當作空的（全部重跑）：寧可慢，也不要錯。
+			const existingTables = new Set<string>();
+			try {
+				for (const t of await ikaros.tables()) existingTables.add(t);
+			} catch {
+				/* 引擎還沒準備好 → 當作沒有表 */
+			}
+			// 版本號在一次執行內固定：中途有檔案被上傳的話，下一次執行自然會
+			// 全部失效，不需要在迴圈裡重新讀（讀了反而讓同一次執行前後不一致）。
+			const version = dataVersion.current;
+			let reused = 0;
+
 			for (const node of ordered) {
 				const label = (node.data as any).label || node.id;
 
@@ -416,10 +494,30 @@ const CanvasInner: React.FC<NymphCanvasProps> = ({
 				const sql = (node.data as any).sqlQuery;
 				if (!sql) continue;
 
+				// 快取判斷。鍵 = 編譯出來的 SQL + 資料版本。
+				// SQL 本身就是（節點類型 + config + 上游）的指紋，不必另外雜湊 config。
+				const key = cacheKey(sql, version);
+				const decision = decideReuse(
+					key,
+					keyBookRef.current.previous(node.id),
+					existingTables.has(node.id),
+				);
+				if (decision.skip) {
+					reused += 1;
+					logs.push(
+						makeExecLog("SKIP", `${label}：${decision.reason}`, {
+							nodeId: node.id,
+						}),
+					);
+					continue;
+				}
+
 				logs.push(makeExecLog("SQL", sql, { nodeId: node.id }));
 				const res = await executeNodeQueryRaw(node.id, sql);
 
 				if (res.ok) {
+					keyBookRef.current.record(node.id, key);
+					existingTables.add(node.id);
 					logs.push(
 						makeExecLog(
 							"SUCCESS",
@@ -432,6 +530,8 @@ const CanvasInner: React.FC<NymphCanvasProps> = ({
 						),
 					);
 				} else {
+					// 失敗**不記鍵**：快取只快取成功。否則一次失敗會被永久沿用。
+					keyBookRef.current.forget(node.id);
 					logs.push(
 						makeExecLog("ERROR", `${label}: ${res.error}`, {
 							nodeId: node.id,
@@ -521,6 +621,20 @@ const CanvasInner: React.FC<NymphCanvasProps> = ({
 			}
 
 			setChaosLog(null);
+
+			// 快取摘要：使用者要能一眼知道「這次有多少東西真的跑了」。
+			// 沒有這一行，一個全部命中的執行看起來會像是什麼都沒發生。
+			if (reused > 0) {
+				logs.push(
+					makeExecLog(
+						"INFO",
+						`執行快取：${reused} / ${ordered.length} 個節點沿用上次結果（設定與資料都未變更）`,
+					),
+				);
+			}
+			// 刪掉的節點不必再記鍵，否則 Map 會隨編輯歷史無限長大
+			keyBookRef.current.retain(ns.map((n) => n.id));
+
 			// 只有「全圖執行」需要推去 Pipeline Log 面板；
 			// click 節點的 log 已經包含在回傳值中，由 onInspectNode 顯示。
 			if (!targetId && onPipelineLog) onPipelineLog(logs);
@@ -548,44 +662,189 @@ const CanvasInner: React.FC<NymphCanvasProps> = ({
 		[nodes, edges, setNodes, setEdges, fitView],
 	);
 
-	const handleNodeConfigChange = useCallback(
-		(nodeId: string, newConfig: any) => {
-			setNodes((nds) =>
-				nds.map((n) => {
-					if (n.id === nodeId) {
-						const upstreamSources = resolveSourceTables(
-							nodeId,
-							(n.data as any).type || "FILTER",
-							edges,
-						);
+	/**
+	 * 落一筆歷史。
+	 *
+	 * 刻意**不**用 useEffect 監看 nodes/edges 來記錄 —— 那會把執行時更新
+	 * executionState、自動排版、套用 Hermes patch 這些程式性變更也記成
+	 * 「使用者編輯」，於是 undo 會走過一堆使用者從沒做過的動作。
+	 * 由發起變更的地方明確呼叫，才是「哪些動作可 undo」的唯一真相。
+	 *
+	 * 必須宣告在 handleNodeConfigChange **之前**：它的 useCallback 依賴
+	 * 這個名字，而 deps 陣列在 render 期間就會求值 —— 宣告在後面的話會踩
+	 * `const` 的 TDZ，直接 ReferenceError。
+	 */
+	const recordHistory = useCallback(
+		(next: { nodes: Node[]; edges: Edge[] }, key?: string) => {
+			if (applyingHistoryRef.current) return;
+			historyRef.current.push(next, key);
+			setHistVersion((v) => v + 1);
+		},
+		[],
+	);
 
-						const compiledSql = generateSqlFromConfig(
-							nodeId,
-							(n.data as any).type || "FILTER",
-							newConfig,
-							upstreamSources,
-							{ falseBranch: hasFalseConsumer(nodeId, edges) },
-						);
+	/** 把一份快照套回畫布。undo / redo 共用 */
+	const applySnapshot = useCallback(
+		(snap: { nodes: Node[]; edges: Edge[] } | null) => {
+			if (!snap) return;
+			applyingHistoryRef.current = true;
+			setNodes(snap.nodes);
+			setEdges(snap.edges);
+			setHistVersion((v) => v + 1);
+			// 下一個 microtask 才解除：React Flow 會因為 nodes 換了而補送
+			// dimension 之類的變更事件，那些不該被記成新的編輯。
+			queueMicrotask(() => {
+				applyingHistoryRef.current = false;
+			});
+		},
+		[setNodes, setEdges],
+	);
 
-						return {
-							...n,
-							data: {
-								...n.data,
-								config: newConfig,
-								sqlQuery: compiledSql,
-								// 一併寫回上游表清單：config 表單靠它查 schema
-								// 做欄位選單（schema 驅動欄位選單）。
-								upstreamTables: upstreamSources,
-								onExecute: () =>
-									executeNodeQuery(nodeId, compiledSql),
-							},
-						};
-					}
-					return n;
-				}),
+	const handleUndo = useCallback(() => {
+		applySnapshot(historyRef.current.undo());
+	}, [applySnapshot]);
+
+	const handleRedo = useCallback(() => {
+		applySnapshot(historyRef.current.redo());
+	}, [applySnapshot]);
+
+	// ---------------------------------------------------------------------
+	// 結構性變更（拖曳 / 刪除）與全域鍵盤
+	// ---------------------------------------------------------------------
+	/**
+	 * 包一層 React Flow 的 onNodesChange，只為「結構性」變更落歷史。
+	 *
+	 * 選取（select）與拖曳中的座標更新刻意**不**記 —— 點一下節點不該是一次
+	 * undo，否則堆疊會被點擊塞滿，真正想回復的編輯反而被擠掉。
+	 * 拖曳只在 `dragging === false`（放開滑鼠）時記一筆。
+	 */
+	const handleNodesChange = useCallback(
+		(changes: NodeChange<Node>[]) => {
+			onNodesChange(changes);
+			if (applyingHistoryRef.current) return;
+
+			const structural = changes.some(
+				(c) =>
+					c.type === "remove" ||
+					(c.type === "position" && c.dragging === false),
+			);
+			if (!structural) return;
+
+			recordHistory(
+				{
+					nodes: applyNodeChanges(changes, nodesRef.current),
+					edges: edgesRef.current,
+				},
+				`nodes:${changes[0]?.type}`,
 			);
 		},
-		[edges, setNodes, executeNodeQuery],
+		[onNodesChange, recordHistory],
+	);
+
+	const handleEdgesChange = useCallback(
+		(changes: EdgeChange<Edge>[]) => {
+			onEdgesChange(changes);
+			if (applyingHistoryRef.current) return;
+
+			// 邊只有「刪除」值得記；選取同樣不記。
+			if (!changes.some((c) => c.type === "remove")) return;
+
+			recordHistory(
+				{
+					nodes: nodesRef.current,
+					edges: applyEdgeChanges(changes, edgesRef.current),
+				},
+				"edges:remove",
+			);
+		},
+		[onEdgesChange, recordHistory],
+	);
+
+	/** 命令面板開關 */
+	const [paletteOpen, setPaletteOpen] = useState(false);
+
+	/**
+	 * 全域鍵盤：⌘K / Ctrl+K 開面板，⌘Z / ⇧⌘Z / ⌘Y 復原與重做。
+	 *
+	 * 綁在 window 而不是畫布容器上：焦點通常在節點表單的輸入框裡，
+	 * 綁容器的話按鍵根本不會傳到畫布。
+	 */
+	useEffect(() => {
+		const onKeyDown = (e: KeyboardEvent) => {
+			const mod = e.metaKey || e.ctrlKey;
+			if (!mod) return;
+			const k = e.key.toLowerCase();
+
+			if (k === "k") {
+				e.preventDefault();
+				setPaletteOpen((v) => !v);
+				return;
+			}
+
+			// 在輸入框裡讓瀏覽器處理 undo —— 使用者期待的是「復原我剛打的字」，
+			// 不是「復原整張圖」。
+			const el = e.target as HTMLElement | null;
+			const typing =
+				!!el &&
+				(el.tagName === "INPUT" ||
+					el.tagName === "TEXTAREA" ||
+					el.isContentEditable);
+			if (typing) return;
+
+			if (k === "z") {
+				e.preventDefault();
+				if (e.shiftKey) handleRedo();
+				else handleUndo();
+			} else if (k === "y") {
+				e.preventDefault();
+				handleRedo();
+			}
+		};
+		window.addEventListener("keydown", onKeyDown);
+		return () => window.removeEventListener("keydown", onKeyDown);
+	}, [handleUndo, handleRedo]);
+
+	const handleNodeConfigChange = useCallback(
+		(nodeId: string, newConfig: any) => {
+			// 先在 updater 外面算出「變更後」的圖：落歷史需要完整快照，
+			// 而 setState 的 updater 必須是純函式，不能在裡面呼叫 setState。
+			const nextNodes = nodesRef.current.map((n) => {
+				if (n.id !== nodeId) return n;
+
+				const upstreamSources = resolveSourceTables(
+					nodeId,
+					(n.data as any).type || "FILTER",
+					edgesRef.current,
+				);
+
+				const compiledSql = generateSqlFromConfig(
+					nodeId,
+					(n.data as any).type || "FILTER",
+					newConfig,
+					upstreamSources,
+					{ falseBranch: hasFalseConsumer(nodeId, edgesRef.current) },
+				);
+
+				return {
+					...n,
+					data: {
+						...n.data,
+						config: newConfig,
+						sqlQuery: compiledSql,
+						// 一併寫回上游表清單：config 表單靠它查 schema
+						// 做欄位選單（schema 驅動欄位選單）。
+						upstreamTables: upstreamSources,
+						onExecute: () => executeNodeQuery(nodeId, compiledSql),
+					},
+				};
+			});
+
+			setNodes(nextNodes);
+			// 合併鍵綁節點：同一段連續輸入（在合併窗內）是一步 undo，
+			// 換到別的節點編輯就是新的一步。
+			recordHistory({ nodes: nextNodes, edges: edgesRef.current }, `config:${nodeId}`);
+		},
+		[setNodes, executeNodeQuery, recordHistory],
 	);
 
 	/**
@@ -977,6 +1236,133 @@ const CanvasInner: React.FC<NymphCanvasProps> = ({
 		],
 	);
 
+	// ---------------------------------------------------------------------
+	// 命令面板
+	// ---------------------------------------------------------------------
+	/** 候選節點直接由目錄投影 —— 新增節點後面板自動認識它，不必另外維護一份清單 */
+	const paletteCandidates = useMemo(
+		() =>
+			Object.values(NODE_CATALOG).map((s) => ({
+				type: s.type,
+				label: s.label,
+				category: s.category,
+				description: s.description,
+				whenToUse: s.whenToUse,
+			})),
+		[],
+	);
+
+	const paletteActions = useMemo(
+		() => [
+			{ id: "run", label: "執行全部", hint: "Run Pipeline", keywords: "run execute 執行 全部 跑" },
+			{ id: "layout", label: "自動排版", hint: "Auto Layout", keywords: "layout auto 排版 排列 整理" },
+			{ id: "undo", label: "復原", hint: "⌘Z", keywords: "undo 復原 退回" },
+			{ id: "redo", label: "重做", hint: "⇧⌘Z", keywords: "redo 重做" },
+			{ id: "export-sql", label: "匯出 SQL", hint: "CTE", keywords: "export sql 匯出 下載" },
+			{ id: "export-python", label: "匯出 Python（Polars）", hint: ".py", keywords: "export python polars 匯出" },
+			{ id: "save", label: "儲存工作流", hint: "JSON", keywords: "save 儲存 存檔" },
+			{ id: "load", label: "載入工作流", hint: "JSON", keywords: "load import open 載入 開啟" },
+			{ id: "new", label: "清空畫布", hint: "New", keywords: "new clear 清空 新增" },
+		],
+		[],
+	);
+
+	/**
+	 * 面板選了一個節點類型 → 在視窗中央放一個新節點。
+	 *
+	 * 刻意與 onDrop 產生**同一個形狀**的節點：兩條建立路徑若長得不一樣，
+	 * 遲早會有一邊漏掉某個欄位（例如 upstreamTables），而且只會在特定路徑下壞。
+	 */
+	const handlePickNodeType = useCallback(
+		(nodeType: string) => {
+			const spec = NODE_CATALOG[nodeType as keyof typeof NODE_CATALOG];
+			if (!spec) return;
+
+			const newNodeId = generateNodeId();
+			const config = defaultConfigFor(spec.type);
+			// 新節點必定沒有下游 → 不必建 FILTER 的 false 表（與 onDrop 同一個理由）
+			const initialSql = generateSqlFromConfig(newNodeId, spec.type, config, [], {
+				falseBranch: false,
+			});
+
+			// 從視窗中心往下錯開，連續加幾個不會完全疊在一起
+			const centre = screenToFlowPosition({
+				x: window.innerWidth / 2,
+				y: window.innerHeight / 2,
+			});
+			const offset = (nodesRef.current.length % 5) * 28;
+
+			const newNode: Node = {
+				id: newNodeId,
+				type: spec.nodeType,
+				position: { x: centre.x + offset, y: centre.y + offset },
+				data: {
+					label: spec.label,
+					type: spec.type,
+					config,
+					sqlQuery: initialSql,
+					executionState: "IDLE",
+					onExecute: () => executeNodeQuery(newNodeId, initialSql),
+					onChangeConfig: (newConfig: any) =>
+						handleNodeConfigChange(newNodeId, newConfig),
+				},
+			};
+
+			const nextNodes = [...nodesRef.current, newNode];
+			setNodes(nextNodes);
+			recordHistory({ nodes: nextNodes, edges: edgesRef.current }, "palette:add");
+		},
+		[
+			screenToFlowPosition,
+			setNodes,
+			executeNodeQuery,
+			handleNodeConfigChange,
+			recordHistory,
+		],
+	);
+
+	/** 面板選了一個動作 → 分派到既有的處理函式（不重寫一份邏輯） */
+	const handlePaletteAction = useCallback(
+		(id: string) => {
+			switch (id) {
+				case "run":
+					return void handleRunPipeline();
+				case "layout":
+					return handleAutoLayout();
+				case "undo":
+					return handleUndo();
+				case "redo":
+					return handleRedo();
+				case "export-sql":
+					return handleExportSql();
+				case "export-python":
+					return handleExportPython();
+				case "save":
+					return handleSaveWorkflow();
+				case "load":
+					// 載入是「開檔案選擇器」而不是「立刻讀一個檔案」——
+					// 借用既有的隱藏 input，不要在面板裡重寫一份讀檔邏輯。
+					fileInputRef.current?.click();
+					return;
+				case "new":
+					return handleNewWorkflow();
+				default:
+					return;
+			}
+		},
+		[
+			handleRunPipeline,
+			handleAutoLayout,
+			handleUndo,
+			handleRedo,
+			handleExportSql,
+			handleExportPython,
+			handleSaveWorkflow,
+			handleLoadWorkflow,
+			handleNewWorkflow,
+		],
+	);
+
 	/** 點擊節點 → 執行「該節點 + 其整個上游子圖」→ 回饋 Data Drawer */
 	const onNodeClick = useCallback(
 		async (_: React.MouseEvent, node: Node) => {
@@ -1155,6 +1541,55 @@ const CanvasInner: React.FC<NymphCanvasProps> = ({
 					<span>Auto Layout (Left to Right)</span>
 				</button>
 
+				{/* 復原 / 重做 / 命令面板。
+				    histVersion 出現在 key 裡是刻意的：canUndo / canRedo 是 ref 上的
+				    值，React 不會因為它變了就重繪 —— 用它當 key 讓按鈕的 disabled
+				    狀態跟上歷史的變化。 */}
+				<div
+					key={`hist-${histVersion}`}
+					className="flex items-center space-x-1"
+				>
+					<button
+						onClick={handleUndo}
+						disabled={!historyRef.current.canUndo}
+						title="復原（⌘Z）"
+						style={{
+							backgroundColor: tokens.bgCard,
+							borderColor: tokens.border,
+							color: tokens.textPrimary,
+						}}
+						className="flex items-center space-x-1.5 border text-xs px-2 py-1.5 rounded-lg shadow-sm hover:opacity-80 transition-all font-medium disabled:opacity-35"
+					>
+						<Undo2 className="w-3.5 h-3.5" />
+					</button>
+					<button
+						onClick={handleRedo}
+						disabled={!historyRef.current.canRedo}
+						title="重做（⇧⌘Z）"
+						style={{
+							backgroundColor: tokens.bgCard,
+							borderColor: tokens.border,
+							color: tokens.textPrimary,
+						}}
+						className="flex items-center space-x-1.5 border text-xs px-2 py-1.5 rounded-lg shadow-sm hover:opacity-80 transition-all font-medium disabled:opacity-35"
+					>
+						<Redo2 className="w-3.5 h-3.5" />
+					</button>
+					<button
+						onClick={() => setPaletteOpen(true)}
+						title="命令面板（⌘K）—— 搜尋節點或動作"
+						style={{
+							backgroundColor: tokens.bgCard,
+							borderColor: tokens.border,
+							color: tokens.textPrimary,
+						}}
+						className="flex items-center space-x-1.5 border text-xs px-3 py-1.5 rounded-lg shadow-sm hover:opacity-80 transition-all font-medium"
+					>
+						<Command className="w-3.5 h-3.5" />
+						<span>⌘K</span>
+					</button>
+				</div>
+
 				{/* 匯出 / 存檔 / 讀檔 */}
 				<button
 					onClick={handleNewWorkflow}
@@ -1331,8 +1766,8 @@ const CanvasInner: React.FC<NymphCanvasProps> = ({
 			<ReactFlow
 				nodes={nodes}
 				edges={edges}
-				onNodesChange={onNodesChange}
-				onEdgesChange={onEdgesChange}
+				onNodesChange={handleNodesChange}
+				onEdgesChange={handleEdgesChange}
 				onConnect={onConnect}
 				onNodeClick={onNodeClick}
 				onDragOver={onDragOver}
@@ -1353,6 +1788,16 @@ const CanvasInner: React.FC<NymphCanvasProps> = ({
 					}}
 				/>
 			</ReactFlow>
+
+			{/* 命令面板。histVersion 只為了讓 canUndo / canRedo 的變化觸發重繪 */}
+			<CommandPalette
+				open={paletteOpen}
+				onClose={() => setPaletteOpen(false)}
+				candidates={paletteCandidates}
+				actions={paletteActions}
+				onPickNode={handlePickNodeType}
+				onRunAction={handlePaletteAction}
+			/>
 		</div>
 	);
 };

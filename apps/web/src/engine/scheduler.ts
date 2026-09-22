@@ -7,7 +7,13 @@ import { Node, Edge } from "@xyflow/react";
 
 export interface ExecLogEntry {
 	ts: number;
-	level: "INFO" | "SQL" | "SUCCESS" | "ERROR" | "CHAOS";
+	/**
+	 * SKIP = 這個節點「沒有執行」，因為它的輸入與上次完全相同（執行快取命中）。
+	 *
+	 * 這必須是一個獨立等級而不是混進 INFO：快取命中如果看不出來，使用者會
+	 * 以為資料是新的。那是快取最危險的失敗形態 —— 靜默地給出舊結果。
+	 */
+	level: "INFO" | "SQL" | "SUCCESS" | "ERROR" | "CHAOS" | "SKIP";
 	message: string;
 	nodeId?: string;
 	durationMs?: number;

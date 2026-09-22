@@ -152,6 +152,10 @@ export const DataDrawer: React.FC<DataDrawerProps> = ({
 				return isLight ? "text-amber-700" : "text-amber-400";
 			case "SQL":
 				return isLight ? "text-sky-700" : "text-sky-400";
+			case "SKIP":
+				// 快取命中的顏色刻意低調（紫），但要與 INFO 的灰明顯不同 ——
+				// 「這個節點沒跑」是使用者必須一眼看到的資訊。
+				return isLight ? "text-violet-700" : "text-violet-400";
 			default:
 				return isLight ? "text-stone-600" : "text-slate-400";
 		}

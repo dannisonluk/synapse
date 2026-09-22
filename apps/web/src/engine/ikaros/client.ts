@@ -6,6 +6,8 @@
 //       至 main thread，並記錄原因供 UI 顯示。此 fallback 保證功能不會因環境而完全喪失。
 import { createCore, dispatch } from "./dispatch";
 import { DEFAULT_MAX_ROWS, type IkarosCore } from "./core";
+// 執行快取的資料版本：每次有新資料進引擎就 +1（見下面的 registerLocalFile）。
+import { dataVersion } from "../cache";
 
 export type { ColumnInfo, PageResult, FileRegistration } from "./core";
 export { DEFAULT_MAX_ROWS } from "./core";
@@ -333,6 +335,12 @@ class IkarosEngine {
 			{ table: tableName, fileName: file.name, bytes },
 			[bytes],
 		);
+		// 新資料進來了 → 讓所有下游的快取鍵一起失效。
+		//
+		// 這一句是必要的，不是保險。重新上傳一個「檔名與欄位都相同」的 CSV 時，
+		// 每個節點編譯出來的 SQL **一字不變**，但資料變了 —— 少了版本號就會命中
+		// 快取而餵出舊資料，而且不會有任何錯誤訊息。這是快取最危險的失敗形態。
+		dataVersion.bump();
 		return {
 			rowCount: Number(res.rowCount ?? 0),
 			columns: res.columns ?? [],
