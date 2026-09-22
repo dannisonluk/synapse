@@ -76,6 +76,29 @@ function section(title) {
 	console.log(`\n\x1b[1m${title}\x1b[0m`);
 }
 
+/**
+ * 去掉 SQL 的 `--` 註解行。
+ *
+ * 為什麼需要：匯出腳本現在每個節點前面都有一行人話說明（見 engine/narrate.ts），
+ * 而說明裡會出現檔名、欄位名這類使用者字串。於是「這個字串不可以出現在匯出的
+ * SQL 裡」這種斷言的**範圍比原意寬** —— 原意是「不可以影響查詢語意」，
+ * 不是「整份檔案都不准出現」。
+ *
+ * 註解不會被執行，所以正確的修法是收窄斷言的範圍，而不是刪掉它。
+ */
+const stripSqlComments = (sql) =>
+	String(sql)
+		.split("\n")
+		.filter((l) => !l.trimStart().startsWith("--"))
+		.join("\n");
+
+/** 同上，給 Python 腳本用（註解是 `#`） */
+const stripPyComments = (src) =>
+	String(src)
+		.split("\n")
+		.filter((l) => !l.trimStart().startsWith("#"))
+		.join("\n");
+
 // ---------------------------------------------------------------------------
 // esbuild discovery — esbuild 只存在於 .pnpm store 內（pnpm 不會 hoist 它）
 // ---------------------------------------------------------------------------
@@ -889,6 +912,75 @@ section("2f. profile.ts — 欄位剖面");
 }
 
 // ===========================================================================
+// 2g. narrate.ts — 管線說明（確定性）
+// ===========================================================================
+// 說明必須與實際跑的 SQL 一致。讓 LLM 自由描述一張圖會產生「看起來合理但不存在
+// 的步驟」，所以骨架由 config 推導，而**推導走的是編譯器同一套正規化函式**。
+const narrMod = await loadTs("apps/web/src/engine/narrate.ts");
+section("2g. narrate.ts — 管線說明");
+
+{
+	const N = (type, config, upstreamLabels) =>
+		narrMod.narrateNode({ type, config, upstreamLabels });
+
+	has("INPUT_DUCKDB names the file", N("INPUT_DUCKDB", { fileName: "sales.csv" }), "sales.csv");
+	check("FILTER states the condition",
+		N("FILTER", { field: "amount", op: ">", val: "1000" }, ["Load"]),
+		"從「Load」讀取，只保留 amount > 1000 的列");
+	check("SUMMARIZE states the grouping and the measure",
+		N("SUMMARIZE", { groupBy: "country", func: "SUM", target: "amount" }),
+		"依「country」分組，對「amount」做 SUM");
+	check("SUMMARIZE without a group key says it collapses the table",
+		N("SUMMARIZE", { groupBy: [], func: "SUM", target: "amount" }),
+		"對「amount」做 SUM（整表聚合成一列）");
+	has("a two-input node names both upstreams",
+		N("JOIN", { leftKey: "id", rightKey: "id" }, ["A", "B"]), "合併「A」與「B」");
+	check("ASSERT states what it guards",
+		N("ASSERT", { assertCheck: "NOT_NULL", assertColumn: "customer" }),
+		"檢查 NOT_NULL：欄位「customer」不得為 NULL，否則整個流程失敗");
+	has("ASSERT uses the custom label when given one",
+		N("ASSERT", { assertCheck: "UNIQUE", assertColumn: "id", assertLabel: "主鍵唯一" }),
+		"檢查「主鍵唯一」");
+	has("SPATIAL_MATCH states the geometry sources and the predicate",
+		N("SPATIAL_MATCH", { leftGeometryField: "wkt", rightLonField: "lon", rightLatField: "lat", spatialPredicate: "WITHIN" }),
+		"WITHIN 空間比對");
+	has("OUTPUT states the target format and filename",
+		N("OUTPUT", { fileName: "out.csv", outputFormat: "CSV" }), "out.csv");
+
+	// 敘述必須走編譯器同一套白名單 —— 否則說明會說出跟實際 SQL 不一樣的事，
+	// 而「說明與實際不符」比沒有說明更糟。
+	check("an illegal FILTER operator is described with the safe fallback, not the raw input",
+		N("FILTER", { field: "a", op: "DROP TABLE", val: "1" }), "只保留 a > 1 的列");
+	has("an illegal assert check is described with the fallback",
+		N("ASSERT", { assertCheck: "WAT", assertColumn: "id" }), "檢查 NOT_NULL");
+	has("an illegal join type falls back", N("JOIN", { joinType: "WAT" }, ["A", "B"]), "INNER JOIN");
+}
+
+{
+	// 未知型別不可以靜默變成空字串 —— 那會讓一個新增的節點在說明裡消失
+	const unknown = narrMod.narrateNode({ type: "SOMETHING_NEW", config: {} });
+	has("an unknown node type is flagged, not silently empty", unknown, "尚未為節點類型");
+	check("...and is detectable by the caller", narrMod.isPlaceholderNarration(unknown), true);
+	check("a real narration is not flagged as a placeholder",
+		narrMod.isPlaceholderNarration(narrMod.narrateNode({ type: "SORT", config: {} })), false);
+}
+
+{
+	// 覆蓋守門：**每一個**目錄節點型別都要有一句真的說明。
+	// 新增節點時忘了寫說明，這條會紅 —— 而不是讓它悄悄變成佔位字串。
+	const missing = Object.keys(palCatalog.NODE_CATALOG)
+		.map((t) => narrMod.narrateNode({ type: t, config: {}, upstreamLabels: ["X", "Y"] }))
+		.filter((text) => narrMod.isPlaceholderNarration(text));
+	check("every catalogued node type has a real narration", missing, []);
+
+	// 而且每一句都必須是「有內容的句子」，不是一個字
+	const tooShort = Object.keys(palCatalog.NODE_CATALOG)
+		.filter((t) => narrMod.narrateNode({ type: t, config: {} }).length < 8)
+		.sort();
+	check("no narration is a stub", tooShort, []);
+}
+
+// ===========================================================================
 // 3. Hermes patch resolution
 // ===========================================================================
 const patchMod = await loadTs("apps/web/src/engine/patch.ts");
@@ -1153,10 +1245,15 @@ check("a non-spatial workflow exports no LOAD", cte.sql.includes("LOAD "), false
 	has("OUTPUT gets its own CTE", outCte.sql, '"node_o" AS (');
 	has("...whose body is a passthrough of the upstream", outCte.sql, 'SELECT * FROM "node_i"');
 	has("...and the final SELECT reads the OUTPUT node", outCte.sql, 'SELECT * FROM "node_o";');
-	check("the OUTPUT filename never leaks into the SQL",
-		outCte.sql.includes("sales.csv"), false);
-	check("the OUTPUT format never leaks into the SQL either",
-		outCte.sql.includes("CSV"), false);
+	// 檔名與格式不可以影響**查詢語意**。它們現在會出現在人話說明註解裡
+	// （那是刻意的），所以這裡比對的是去掉註解後的 SQL。
+	check("the OUTPUT filename never reaches the query",
+		stripSqlComments(outCte.sql).includes("sales.csv"), false);
+	check("the OUTPUT format never reaches the query either",
+		stripSqlComments(outCte.sql).includes("CSV"), false);
+	// 反向：說明確實有寫進去，否則上面兩條會因為「整份檔案都沒有檔名」而假通過
+	has("...but the narration does mention it, so a reader knows the target file",
+		outCte.sql, "sales.csv");
 }
 
 // raw SQL 節點（使用者自己寫的，沒有 data.type）
@@ -1900,8 +1997,10 @@ section("8. exportPolars.ts — Python / Polars 腳本匯出");
 	has("OUTPUT strips a Windows path from the filename",
 		one("OUTPUT", { fileName: "C:\\tmp\\out.csv", outputFormat: "CSV" }),
 		'write_csv("out.csv")');
-	check("OUTPUT never emits the raw filename",
-		one("OUTPUT", { fileName: "../../etc/passwd.csv", outputFormat: "CSV" }).includes("../../"),
+	// 同上：路徑不可以進到**程式碼**，但出現在說明註解裡是對的（讀者要看得出
+	// 這個節點會寫去哪個檔案）。
+	check("OUTPUT never emits the raw filename into the code",
+		stripPyComments(one("OUTPUT", { fileName: "../../etc/passwd.csv", outputFormat: "CSV" })).includes("../../"),
 		false);
 	has("an unknown OUTPUT format falls back to CSV",
 		one("OUTPUT", { fileName: "x", outputFormat: "PARQUET" }),
@@ -1955,11 +2054,15 @@ section("8. exportPolars.ts — Python / Polars 腳本匯出");
 	has("...leaves a TODO", asBad.script, "# TODO: ASSERT 述句無法自動翻譯");
 	check("...and does not pretend the check ran",
 		asBad.script.includes("raise ValueError"), false);
-	// 訊息裡會嵌欄位名，而欄位名是使用者可控的 —— 內層雙引號會提早結束 f-string
+	// 訊息裡會嵌欄位名，而欄位名是使用者可控的 —— 內層雙引號會提早結束 f-string。
+	// 檢查的是那條 raise 陳述本身：說明註解裡出現欄位名是無害的（不會被執行）。
+	const asRaiseLine =
+		one("ASSERT", { assertCheck: "NOT_NULL", assertColumn: 'a"b' })
+			.split("\n")
+			.find((l) => l.includes("raise ValueError")) ?? "";
 	check("ASSERT never leaves a double quote inside an f-string message",
-		one("ASSERT", { assertCheck: "NOT_NULL", assertColumn: 'a"b' }).includes('「a"b」'), false);
-	has("...it swaps it for a single quote instead",
-		one("ASSERT", { assertCheck: "NOT_NULL", assertColumn: 'a"b' }), "「a'b」");
+		asRaiseLine.includes('「a"b」'), false);
+	has("...it swaps it for a single quote instead", asRaiseLine, "「a'b」");
 
 	// --- 產生的腳本必須是合法的 Python（用 CPython 真的編譯一次）---
 	// 字串比對只能證明「看起來像 Python」。這裡真的交給 CPython 檢查語法。
@@ -2816,6 +2919,31 @@ section("11. repo 一致性 — 衍生產物、設定檔、死程式碼");
 	// 反向：這些關鍵呼叫點若被刪掉，上面的斷言會紅；但也要確認掃描不是空的。
 	check("the wiring scan read a non-trivial file", canvasSrc.length > 10000, true);
 	check("the drawer wiring scan read a non-trivial file", drawerSrc.length > 10000, true);
+
+	// --- 管線說明（narrate.ts）---
+	// 說明要真的進到兩個匯出，否則它只是一個沒人用的模組。
+	// 用最小 fixture 而不是既有的大 fixture：這裡測的是「有沒有被接上」，
+	// 不是 CTE 的內容。
+	{
+		const narrNodes = [
+			mk("node_in", { label: "Load", type: "INPUT_DUCKDB", config: { fileName: "s.csv" } }),
+			mk("node_f", { label: "Keep big", type: "FILTER", config: { field: "amount", op: ">", val: "1000" } }),
+		];
+		const narrEdges = [{ id: "e1", source: "node_in", target: "node_f" }];
+
+		const narrCte = exporter.exportToSqlCte(narrNodes, narrEdges);
+		has("the SQL export carries the narration as a comment",
+			narrCte.sql, "-- 從「Load」讀取，只保留 amount > 1000 的列");
+		// 註解不能影響語意：去掉註解後，說明文字必須完全不見
+		check("the narration is comment-only and never reaches the SQL",
+			stripSqlComments(narrCte.sql).includes("只保留"), false);
+
+		const narrPy = polars.exportToPolars(narrNodes, narrEdges);
+		has("the Python export carries the narration too",
+			narrPy.script, "# 從「Load」讀取，只保留 amount > 1000 的列");
+		check("...and it is comment-only there as well",
+			stripPyComments(narrPy.script).includes("只保留"), false);
+	}
 }
 
 // ===========================================================================
