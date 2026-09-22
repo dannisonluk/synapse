@@ -510,6 +510,284 @@ check("toCsv honours a custom delimiter",
 	csvMod.toCsv([{ a: 1, b: 2 }], ["a", "b"], "\t"), "a\tb\r\n1\t2\r\n");
 
 // ===========================================================================
+// 2c. cache.ts — 執行快取
+// ===========================================================================
+// 快取是「靜默錯誤」的溫床：判斷錯了，使用者看到的是舊資料，而**沒有任何提示**。
+// 所以這裡逐條釘住決策，而不只是測「有沒有跳過」。
+const cacheMod = await loadTs("apps/web/src/engine/cache.ts");
+section("2c. cache.ts — 執行快取");
+
+check("stableHash is deterministic", cacheMod.stableHash("abc"), cacheMod.stableHash("abc"));
+check("stableHash returns 8 hex digits", /^[0-9a-f]{8}$/.test(cacheMod.stableHash("abc")), true);
+check("stableHash distinguishes similar inputs",
+	cacheMod.stableHash("abc") !== cacheMod.stableHash("abd"), true);
+check("stableHash handles the empty string", /^[0-9a-f]{8}$/.test(cacheMod.stableHash("")), true);
+check("stableHash handles CJK",
+	cacheMod.stableHash("篩選") !== cacheMod.stableHash("篩選 "), true);
+
+check("cacheKey carries the data version",
+	cacheMod.cacheKey("SELECT 1", 1) !== cacheMod.cacheKey("SELECT 1", 2), true);
+check("cacheKey is stable for the same inputs",
+	cacheMod.cacheKey("SELECT 1", 7), cacheMod.cacheKey("SELECT 1", 7));
+check("cacheKey changes when the SQL changes",
+	cacheMod.cacheKey("SELECT 1", 1) !== cacheMod.cacheKey("SELECT 2", 1), true);
+
+{
+	const d = cacheMod.decideReuse("k1", undefined, true);
+	check("first run is never skipped", d.skip, false);
+	check("a first run says why it ran", d.reason, "首次執行");
+}
+{
+	const d = cacheMod.decideReuse("k2", "k1", true);
+	check("a changed key forces a re-run", d.skip, false);
+	check("a changed key says why it ran", d.reason, "設定、上游或資料已變更");
+}
+{
+	const d = cacheMod.decideReuse("k1", "k1", false);
+	check("a missing output table forces a re-run even when the key matches", d.skip, false);
+	check("a missing table says why it ran", d.reason, "輸出表已不存在（需重建）");
+}
+{
+	const d = cacheMod.decideReuse("k1", "k1", true);
+	check("an unchanged key with a live table is reused", d.skip, true);
+	check("a reuse says why it skipped", d.reason, "沿用上次結果（未變更）");
+	check("...and reports the key to record", d.key, "k1");
+}
+
+{
+	const dv = new cacheMod.DataVersion();
+	check("a fresh DataVersion starts at 0", dv.current, 0);
+	check("bump returns the new version", dv.bump(), 1);
+	check("bump advances the version", dv.current, 1);
+	check("bumping again keeps going", dv.bump(), 2);
+	// 兩個實例互不影響 —— 模組層級的裸變數會讓測試互相污染
+	const other = new cacheMod.DataVersion();
+	check("two DataVersions are independent", other.current, 0);
+}
+
+{
+	const book = new cacheMod.NodeKeyBook();
+	check("an unknown node has no previous key", book.previous("a"), undefined);
+	book.record("a", "k1");
+	check("a recorded key is readable", book.previous("a"), "k1");
+	book.record("a", "k2");
+	check("recording again overwrites", book.previous("a"), "k2");
+	book.forget("a");
+	check("forget clears the key", book.previous("a"), undefined);
+	book.record("a", "k1");
+	book.record("b", "k1");
+	book.record("c", "k1");
+	book.retain(["a", "c"]);
+	check("retain drops keys for deleted nodes", [book.previous("a"), book.previous("b"), book.previous("c")],
+		["k1", undefined, "k1"]);
+	check("retain reports the surviving size", book.size, 2);
+}
+
+// ===========================================================================
+// 2d. history.ts — Undo / Redo
+// ===========================================================================
+// 最難的部分不是存快照，是**合併規則**：表單每打一個字都會觸發 onChangeConfig。
+// 合併寫錯不會報錯，只會讓人覺得「undo 壞了」。
+const histMod = await loadTs("apps/web/src/engine/history.ts");
+section("2d. history.ts — Undo / Redo");
+
+{
+	const h = new histMod.History();
+	h.reset("A");
+	check("reset seeds one entry", h.depth, 1);
+	check("reset alone cannot be undone (opening a file is not an edit)", h.canUndo, false);
+	check("...and cannot be redone", h.canRedo, false);
+	check("current is the seeded value", h.current(), "A");
+}
+
+{
+	const h = new histMod.History();
+	h.reset("A");
+	h.push("B");
+	h.push("C");
+	check("two pushes give three entries", h.depth, 3);
+	check("undo returns the previous state", h.undo(), "B");
+	check("undo again returns the seed", h.undo(), "A");
+	check("undo past the start returns null", h.undo(), null);
+	check("redo returns the next state", h.redo(), "B");
+	check("redo again", h.redo(), "C");
+	check("redo past the end returns null", h.redo(), null);
+	check("canUndo is false at the seed", (h.undo(), h.undo(), h.canUndo), false);
+}
+
+{
+	// 合併：同一段連續輸入是一步，不是十步
+	const h = new histMod.History({ coalesceMs: 400 });
+	h.reset("A");
+	h.push("B1", "field:x", 1000);
+	h.push("B2", "field:x", 1100);
+	h.push("B3", "field:x", 1200);
+	check("a burst of same-key edits collapses into one step", h.depth, 2);
+	check("...keeping the latest value", h.current(), "B3");
+	check("one undo reaches the state before the burst", h.undo(), "A");
+}
+
+{
+	// 暫停 = 切分點（用更新 at 而不是保留原本的，才會有這個行為）
+	const h = new histMod.History({ coalesceMs: 400 });
+	h.reset("A");
+	h.push("B", "field:x", 1000);
+	h.push("C", "field:x", 1500); // 超過 400ms
+	check("a pause breaks the burst into two steps", h.depth, 3);
+	check("undo goes back one burst, not all the way", h.undo(), "B");
+}
+
+{
+	const h = new histMod.History({ coalesceMs: 400 });
+	h.reset("A");
+	h.push("B", "field:x", 1000);
+	h.push("C", "field:y", 1050);
+	check("a different key is always a separate step", h.depth, 3);
+}
+
+{
+	const h = new histMod.History({ coalesceMs: 400 });
+	h.reset("A");
+	h.push("B", undefined, 1000);
+	h.push("C", undefined, 1010);
+	check("an undefined key never coalesces", h.depth, 3);
+}
+
+{
+	// undo 之後再編輯：新的一步，而且**不能**跟前一筆合併
+	const h = new histMod.History({ coalesceMs: 400 });
+	h.reset("A");
+	h.push("B", "field:x", 1000);
+	h.push("C", "field:x", 1050); // 與 B 合併 → stack = [A, C]
+	check("the burst collapsed", h.depth, 2);
+	check("undo goes back to A", h.undo(), "A");
+	h.push("D", "field:x", 1100); // 在 A 之後編輯同一個欄位
+	check("editing after an undo truncates the redo branch", h.depth, 2);
+	check("...and does NOT merge with the pre-undo entry", h.current(), "D");
+	check("...so redo is gone", h.canRedo, false);
+	check("...and undo still reaches A", h.undo(), "A");
+}
+
+{
+	const h = new histMod.History({ limit: 3 });
+	h.reset("A");
+	h.push("B");
+	h.push("C");
+	h.push("D");
+	check("the stack is capped at the limit", h.depth, 3);
+	check("...keeping the newest values", h.current(), "D");
+	check("...and the oldest is gone", (h.undo(), h.undo(), h.canUndo), false);
+	check("undo bottoms out at the oldest surviving entry", h.current(), "B");
+}
+
+{
+	const h = new histMod.History({ coalesceMs: 400 });
+	h.reset("A");
+	h.push("B", "field:x", 1000);
+	h.breakCoalescing();
+	h.push("C", "field:x", 1010);
+	check("breakCoalescing stops the next edit merging in", h.depth, 3);
+}
+
+{
+	const h = new histMod.History();
+	h.reset("A");
+	h.push("B");
+	check("position tracks the cursor", h.position, 1);
+	h.undo();
+	check("position moves back on undo", h.position, 0);
+	check("a fresh History has no current value", new histMod.History().current(), null);
+}
+
+// ===========================================================================
+// 2e. palette.ts — 命令面板搜尋
+// ===========================================================================
+const palMod = await loadTs("apps/web/src/engine/palette.ts");
+const palCatalog = await loadTs("apps/web/src/engine/nodeCatalog.ts");
+section("2e. palette.ts — 命令面板搜尋");
+
+const CANDS = [
+	{ type: "JOIN", label: "Join", category: "Join", description: "兩表連接", whenToUse: "使用者說「連接 / 合併兩張表」時。" },
+	{ type: "FUZZY_JOIN", label: "Fuzzy Join", category: "Join", description: "模糊比對連接", whenToUse: "使用者說「模糊比對 / 拼字不同」時。" },
+	{ type: "OUTPUT", label: "Output Data", category: "In/Out", description: "標記輸出", whenToUse: "使用者說「輸出 / 下載 / 匯出成檔案」時。" },
+	{ type: "SORT", label: "Sort", category: "Preparation", description: "排序", whenToUse: "使用者說「排序 / 由大到小」時。" },
+];
+
+check("an empty query lists everything",
+	palMod.rankNodeTypes("", CANDS, 0).length, 4);
+check("an empty query keeps the catalogue order",
+	palMod.rankNodeTypes("", CANDS, 0).map((h) => h.type), ["JOIN", "FUZZY_JOIN", "OUTPUT", "SORT"]);
+check("an exact type name ranks first",
+	palMod.rankNodeTypes("join", CANDS)[0].type, "JOIN");
+check("an exact label match ranks first",
+	palMod.rankNodeTypes("fuzzy join", CANDS)[0].type, "FUZZY_JOIN");
+check("a label prefix beats a substring elsewhere",
+	palMod.rankNodeTypes("so", CANDS)[0].type, "SORT");
+check("searching the type name finds it",
+	palMod.rankNodeTypes("output", CANDS)[0].type, "OUTPUT");
+// whenToUse 是中文的自然語言描述 —— 使用者打「下載」要能找到 OUTPUT
+check("a Chinese keyword in whenToUse finds the node",
+	palMod.rankNodeTypes("下載", CANDS)[0].type, "OUTPUT");
+check("...and reports that it matched on whenToUse",
+	palMod.rankNodeTypes("下載", CANDS)[0].matchedOn, "whenToUse");
+check("a description keyword is the weakest tier",
+	palMod.rankNodeTypes("兩表連接", CANDS)[0].matchedOn, "description");
+// 多詞採 AND：「fuzzy join」不該把 JOIN 也撈進來
+check("a multi-word query requires every term to hit",
+	palMod.rankNodeTypes("fuzzy join", CANDS).map((h) => h.type), ["FUZZY_JOIN"]);
+check("...so a partial match is excluded",
+	palMod.rankNodeTypes("fuzzy join", CANDS).some((h) => h.type === "JOIN"), false);
+check("a query that hits nothing returns nothing",
+	palMod.rankNodeTypes("zzzznope", CANDS), []);
+check("the query is case-insensitive",
+	palMod.rankNodeTypes("FUZZY", CANDS)[0].type, "FUZZY_JOIN");
+check("the query is trimmed",
+	palMod.rankNodeTypes("   sort   ", CANDS)[0].type, "SORT");
+check("limit truncates the result", palMod.rankNodeTypes("", CANDS, 2).length, 2);
+
+// 每一個目錄條目都必須找得到 —— 這條守的是「新增節點時忘了寫 whenToUse」。
+// 找不到的節點等於在面板裡不存在。
+{
+	const cands = Object.values(palCatalog.NODE_CATALOG).map((s) => ({
+		type: s.type,
+		label: s.label,
+		category: s.category,
+		description: s.description,
+		whenToUse: s.whenToUse,
+	}));
+	check("the palette corpus covers the whole catalogue", cands.length, palCatalog.NODE_TYPES.length);
+
+	const notFoundByLabel = cands
+		.filter((c) => !palMod.rankNodeTypes(c.label, cands, 0).some((h) => h.type === c.type))
+		.map((c) => c.type);
+	check("every node type is findable by its own label", notFoundByLabel, []);
+
+	const notFirstByType = cands
+		.filter((c) => palMod.rankNodeTypes(c.type, cands, 0)[0]?.type !== c.type)
+		.map((c) => c.type);
+	check("every node type ranks first when you type its type name", notFirstByType, []);
+
+	// whenToUse 是搜尋語料的主體，空白就等於這個節點只能用名字找
+	const emptyWhenToUse = cands.filter((c) => !String(c.whenToUse ?? "").trim()).map((c) => c.type);
+	check("every node type declares a whenToUse (the palette's search corpus)", emptyWhenToUse, []);
+}
+
+{
+	const ACTIONS = [
+		{ id: "run", label: "執行全部", hint: "⌘⏎", keywords: "run execute 執行" },
+		{ id: "export-sql", label: "匯出 SQL", hint: "⌘S", keywords: "export sql 匯出" },
+		{ id: "export-py", label: "匯出 Python", keywords: "export polars python" },
+		{ id: "undo", label: "復原", hint: "⌘Z", keywords: "undo 復原" },
+	];
+	check("an empty action query lists the first few", palMod.rankActions("", ACTIONS).length, 4);
+	check("an action is found by its label", palMod.rankActions("匯出 sql", ACTIONS)[0].id, "export-sql");
+	check("an action is found by its keywords", palMod.rankActions("polars", ACTIONS)[0].id, "export-py");
+	check("an action is found by its id", palMod.rankActions("undo", ACTIONS)[0].id, "undo");
+	check("an unmatched action query returns nothing", palMod.rankActions("zzz", ACTIONS), []);
+	check("action limit truncates", palMod.rankActions("", ACTIONS, 2).length, 2);
+}
+
+// ===========================================================================
 // 3. Hermes patch resolution
 // ===========================================================================
 const patchMod = await loadTs("apps/web/src/engine/patch.ts");
