@@ -788,6 +788,107 @@ check("limit truncates the result", palMod.rankNodeTypes("", CANDS, 2).length, 2
 }
 
 // ===========================================================================
+// 2f. profile.ts — 欄位剖面
+// ===========================================================================
+// 剖面唯一的失敗模式是「查詢直接失敗」——一個欄位壞掉就整個剖面看不到。
+// 所以先實測確認**所有型別**都支援四種量測（見 wasm 那節），這裡再釘住 SQL 形狀。
+const profMod = await loadTs("apps/web/src/engine/profile.ts");
+section("2f. profile.ts — 欄位剖面");
+
+{
+	const q = profMod.buildProfileQuery("t", [
+		{ name: "id", type: "INTEGER" },
+		{ name: "amount", type: "DECIMAL(10,2)" },
+	]);
+	// 一次查詢算完全部：N 欄 × 4 量測 + 1 個總列數
+	check("one statement covers every column and measure", q.fields.length, 8);
+	check("the SQL is a single SELECT over the table", q.sql.startsWith("SELECT "), true);
+	check("...with no GROUP BY (it must return exactly one row)",
+		q.sql.includes("GROUP BY"), false);
+	check("COUNT(*) is always present", q.sql.includes(`COUNT(*) AS "__rows"`), true);
+	// 別名一律引號包裹：引號讓別名變大小寫敏感，解析時才能精確比對
+	check("aliases are quoted so they stay case-sensitive",
+		q.sql, `SELECT COUNT(*) AS "__rows", COUNT("id") AS "id__nn", COUNT(DISTINCT "id") AS "id__nd", MIN("id") AS "id__mn", MAX("id") AS "id__mx", COUNT("amount") AS "amount__nn", COUNT(DISTINCT "amount") AS "amount__nd", MIN("amount") AS "amount__mn", MAX("amount") AS "amount__mx" FROM "t"`);
+	check("a hostile column name is quoted", profMod.buildProfileQuery("t", [{ name: 'a"b', type: "VARCHAR" }]).sql
+		.includes('COUNT("a""b")'), true);
+	check("a hostile table name is quoted", profMod.buildProfileQuery('t"; DROP', []).sql
+		.endsWith('FROM "t""; DROP"'), true);
+}
+
+{
+	// 重複欄位名（describe 不該給，但防禦一下）：別名要加序號，
+	// 否則結果物件只會留一個鍵 —— SQL 不報錯、解析卻默默少一欄。
+	const q = profMod.buildProfileQuery("t", [
+		{ name: "a", type: "INTEGER" },
+		{ name: "a", type: "INTEGER" },
+	]);
+	check("a duplicate column gets suffixed aliases",
+		q.fields.filter((f) => f.alias.startsWith("a__nn")).map((f) => f.alias),
+		["a__nn", "a__nn_2"]);
+	check("every alias is unique", new Set(q.fields.map((f) => f.alias)).size, q.fields.length);
+}
+
+{
+	check("a blank column name is skipped",
+		profMod.buildProfileQuery("t", [{ name: "  ", type: "INTEGER" }]).fields.length, 0);
+	check("no columns still yields a valid count query",
+		profMod.buildProfileQuery("t", []).sql, `SELECT COUNT(*) AS "__rows" FROM "t"`);
+}
+
+{
+	const q = profMod.buildProfileQuery("t", [{ name: "id", type: "INTEGER" }]);
+	const profile = profMod.parseProfileRow(
+		{ __rows: 4, id__nn: 3, id__nd: 2, id__mn: 1, id__mx: 9 },
+		q,
+		[{ name: "id", type: "INTEGER" }],
+	);
+	check("the row count is parsed", profile.rows, 4);
+	check("nulls / distinct / min / max are parsed",
+		[profile.columns[0].nulls, profile.columns[0].distinct, profile.columns[0].min, profile.columns[0].max],
+		[3, 2, "1", "9"]);
+	check("the column type is carried through", profile.columns[0].type, "INTEGER");
+	// 順序必須跟表的欄位順序一致，不是別名順序
+	const multi = profMod.parseProfileRow(
+		{ __rows: 1, b__nn: 1, a__nn: 1 },
+		profMod.buildProfileQuery("t", [{ name: "b", type: "X" }, { name: "a", type: "Y" }]),
+		[{ name: "b", type: "X" }, { name: "a", type: "Y" }],
+	);
+	check("columns keep the table's order", multi.columns.map((c) => c.name), ["b", "a"]);
+	// 缺少的鍵要保持 null，不可變成 0 —— 「沒量到」與「量到 0」是不同的事實
+	const partial = profMod.parseProfileRow({ __rows: 0 }, q, [{ name: "id", type: "INTEGER" }]);
+	check("a missing measure stays null, not 0",
+		[partial.columns[0].nulls, partial.columns[0].distinct, partial.columns[0].min],
+		[null, null, null]);
+	check("an absent row is handled", profMod.parseProfileRow(undefined, q, []).rows, 0);
+}
+
+{
+	check("displayValue passes a string through", profMod.displayValue("abc"), "abc");
+	check("displayValue keeps null as null", profMod.displayValue(null), null);
+	check("displayValue stringifies a number", profMod.displayValue(42), "42");
+	check("displayValue keeps 0 (it is a real value)", profMod.displayValue(0), "0");
+	check("displayValue renders a boolean", profMod.displayValue(false), "false");
+	check("displayValue renders a Date as ISO", profMod.displayValue(new Date(Date.UTC(2024, 0, 1))), "2024-01-01T00:00:00.000Z");
+	check("displayValue JSON-encodes a list", profMod.displayValue([1, 2]), "[1,2]");
+	check("displayValue JSON-encodes a struct", profMod.displayValue({ a: 1 }), '{"a":1}');
+	// 上限：MIN() 作用在超長 VARCHAR 上會回傳整個字串，不能讓它進 UI
+	const long = profMod.displayValue("x".repeat(500));
+	check("displayValue truncates a long value", long.length, 80);
+	check("...and marks it as truncated", long.endsWith("…"), true);
+}
+
+{
+	// 列數為 0 時回 null 而不是 0：「空表」與「沒有 NULL」是不同的事實
+	const col = { name: "a", type: "INTEGER", nulls: 0, distinct: 0, min: null, max: null };
+	check("nullRatio of an empty table is undefined, not 0", profMod.nullRatio(col, 0), null);
+	check("nullRatio of no nulls is 0", profMod.nullRatio(col, 10), 0);
+	check("nullRatio computes the fraction",
+		profMod.nullRatio({ ...col, nulls: 3 }, 12), 0.25);
+	check("nullRatio with an unmeasured column is undefined",
+		profMod.nullRatio({ ...col, nulls: null }, 10), null);
+}
+
+// ===========================================================================
 // 3. Hermes patch resolution
 // ===========================================================================
 const patchMod = await loadTs("apps/web/src/engine/patch.ts");
@@ -2699,8 +2800,22 @@ section("11. repo 一致性 — 衍生產物、設定檔、死程式碼");
 	has("...and the search/rank logic is the engine module", canvasSrc, "rankNodeTypes");
 	has("...and there is a mouse path to open it", canvasSrc, "setPaletteOpen(true)");
 
+	// --- 資料剖面 ---
+	has("the drawer has a profile action", drawerSrc, "runProfile");
+	has("...that builds its query in the engine module", drawerSrc, "buildProfileQuery(");
+	has("...and parses the result there too", drawerSrc, "parseProfileRow(");
+	has("...and uses the real schema, not whatever the paging query returned",
+		drawerSrc, "await ikaros.describe(tableName)");
+	// 剖面是衍生事實，只能活在元件 state。寫進 config 會污染存檔、
+	// 讓執行快取的鍵不穩定，而且會隨工作流檔一起傳給別人。
+	has("...and the result lives in component state, never in node config",
+		drawerSrc, "useState<TableProfile | null>(null)");
+	has("...and is cleared when the table changes", drawerSrc, "setProfile(null)");
+	has("...and the row count feeds the null-ratio display", drawerSrc, "nullRatio(c, profile.rows)");
+
 	// 反向：這些關鍵呼叫點若被刪掉，上面的斷言會紅；但也要確認掃描不是空的。
 	check("the wiring scan read a non-trivial file", canvasSrc.length > 10000, true);
+	check("the drawer wiring scan read a non-trivial file", drawerSrc.length > 10000, true);
 }
 
 // ===========================================================================

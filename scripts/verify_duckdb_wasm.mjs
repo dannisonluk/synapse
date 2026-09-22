@@ -1338,6 +1338,72 @@ export async function runDuckDbWasmChecks(root, loadTs, fallbackPipelines = []) 
 	add("ASSERT needs no DuckDB extension", compiler.requiredExtensions("ASSERT"), []);
 
 	// =====================================================================
+	// 11j. profile.ts — 欄位剖面（真的跑一次）
+	// =====================================================================
+	// 剖面唯一的失敗模式是「查詢直接失敗」—— 一個欄位壞掉，整個剖面就什麼都
+	// 看不到。所以這裡刻意用一張**什麼型別都有**的表：LIST / STRUCT / BLOB /
+	// INTERVAL 全部放進去，確認四種量測在每個型別上都成立。
+	// 實測結果就是「不需要型別白名單」的依據 —— 少了白名單，也就不會出現
+	// 「為什麼這一欄沒有剖面」這種需要解釋的狀態。
+	const profiler = await loadTs("apps/web/src/engine/profile.ts");
+	conn.query(`CREATE OR REPLACE TABLE pf AS SELECT
+		1 AS id, 'x' AS label, TRUE AS flag, DATE '2024-01-01' AS dt,
+		[1, 2] AS lst, {'a': 1} AS st, 'abc'::BLOB AS blb, INTERVAL 1 DAY AS iv
+	UNION ALL SELECT
+		2, 'y', FALSE, DATE '2024-01-02', [3], {'a': 2}, 'def'::BLOB, INTERVAL 2 DAY
+	UNION ALL SELECT
+		NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL;`);
+
+	const pfCols = schema("pf").map((n) => ({ name: n, type: "UNKNOWN" }));
+	const pfQuery = profiler.buildProfileQuery("pf", pfCols);
+	let pfProfile = null;
+	let pfErr = "ok";
+	try {
+		const rows = conn.query(pfQuery.sql).toArray().map((r) => r.toJSON());
+		pfProfile = profiler.parseProfileRow(rows[0], pfQuery, pfCols);
+	} catch (err) {
+		pfErr = String(err.message).split("\n")[0].slice(0, 90);
+	}
+	add("the profile query runs on a table of every awkward type", pfErr, "ok");
+	add("...and returns exactly one row's worth of measures", pfProfile?.rows, 3);
+
+	const byName = Object.fromEntries((pfProfile?.columns ?? []).map((c) => [c.name, c]));
+	add("the profile sees every column", Object.keys(byName).sort(),
+		["blb", "dt", "flag", "id", "iv", "label", "lst", "st"]);
+	add("...counting the nulls in the all-null row",
+		[byName.id?.nulls, byName.lst?.nulls, byName.blb?.nulls], [2, 2, 2]);
+	add("...and the distinct values", [byName.id?.distinct, byName.label?.distinct], [2, 2]);
+	add("...and the min / max of a number", [byName.id?.min, byName.id?.max], ["1", "2"]);
+	add("...and of a string", [byName.label?.min, byName.label?.max], ["x", "y"]);
+	add("...and of a boolean", [byName.flag?.min, byName.flag?.max], ["false", "true"]);
+	// 每個欄位都要有四個量測。缺一個就會在 UI 上變成沒有解釋的空白。
+	add("every column gets all four measures",
+		(pfProfile?.columns ?? [])
+			.filter((c) => c.nulls === null || c.distinct === null || c.min === undefined || c.max === undefined)
+			.map((c) => c.name),
+		[]);
+	// 注意：DECIMAL / DATE 的 MIN/MAX 走**原始引擎路徑**會是未縮放的整數或 epoch
+	// 毫秒（實測 MIN(DECIMAL(2,1)) 回 15 而不是 1.5）。應用裡不會這樣 ——
+	// arrowTableToJSON 會依 field type 還原（見 README 的 DECIMAL 條目）。
+	// 所以這裡刻意**不**斷言 DECIMAL / DATE 的 min/max 字串：那是在測
+	// duckdb-wasm 的原始表示法，不是測剖面。
+
+	// 空表：COUNT(DISTINCT) 回 0、MIN/MAX 回 NULL，而 nullRatio 必須回 null
+	// 而不是 0%（「空表」與「沒有 NULL」是不同的事實）。
+	conn.query("CREATE OR REPLACE TABLE pf_empty AS SELECT * FROM pf WHERE 1 = 0;");
+	{
+		const emptyCols = schema("pf_empty").map((n) => ({ name: n, type: "UNKNOWN" }));
+		const emptyQuery = profiler.buildProfileQuery("pf_empty", emptyCols);
+		const rows = conn.query(emptyQuery.sql).toArray().map((r) => r.toJSON());
+		const emptyProfile = profiler.parseProfileRow(rows[0], emptyQuery, emptyCols);
+		add("an empty table profiles to zero rows", emptyProfile.rows, 0);
+		add("...with zero distinct and a null min",
+			[emptyProfile.columns[0].distinct, emptyProfile.columns[0].min], [0, null]);
+		add("...and its null ratio is undefined, not 0",
+			profiler.nullRatio(emptyProfile.columns[0], emptyProfile.rows), null);
+	}
+
+	// =====================================================================
 	// 12. 視窗 / 序列組：MULTI_ROW_FORMULA / RUNNING_TOTAL / RANK
 	// =====================================================================
 	conn.query(
