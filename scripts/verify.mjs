@@ -2920,6 +2920,17 @@ section("11. repo 一致性 — 衍生產物、設定檔、死程式碼");
 	check("the wiring scan read a non-trivial file", canvasSrc.length > 10000, true);
 	check("the drawer wiring scan read a non-trivial file", drawerSrc.length > 10000, true);
 
+	// --- 執行計畫（EXPLAIN）---
+	{
+		const nodeSrc = read("apps/web/src/components/nymph/nodes/AlteryxNode.tsx");
+		has("the node has a plan toggle", nodeSrc, "loadPlan");
+		// 一定要走編譯器的語句清單：自己用 `;` 切字串會被字面值裡的分號騙到
+		has("...that asks the compiler for the statement list", nodeSrc, "compileNodeStatements(");
+		has("...and explains a single statement", nodeSrc, "EXPLAIN ${single}");
+		has("...and surfaces a planning failure instead of showing nothing",
+			nodeSrc, "planError");
+	}
+
 	// --- 管線說明（narrate.ts）---
 	// 說明要真的進到兩個匯出，否則它只是一個沒人用的模組。
 	// 用最小 fixture 而不是既有的大 fixture：這裡測的是「有沒有被接上」，

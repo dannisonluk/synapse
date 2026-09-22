@@ -1683,6 +1683,32 @@ export async function runDuckDbWasmChecks(root, loadTs, fallbackPipelines = []) 
 	}
 	add("every catalogued node type produces SQL the real engine accepts", unsupported, []);
 
+	// 14b-2. 每個節點的查詢都要能被**規劃**（EXPLAIN）
+	//
+	// UI 的「執行計畫」按鈕本身只是顯示，沒什麼好測的。真正有價值的是這一條：
+	// EXPLAIN 會走完整的 binder 與 planner，所以欄位不存在、型別不符、函式不在
+	// catalog 這類**語意錯誤**在這裡就會現形 —— 不必真的執行，也不必等使用者踩到。
+	// 這等於替每個節點多加了一層「查詢合法嗎」的守門，而且它守的是「規劃階段」
+	// 而不是「執行階段」：上面那條要真的把表建出來，這條不會。
+	{
+		const unplannable = [];
+		for (const t of catalogTypes) {
+			const stmts = compiler.compileNodeStatements("probe_node", t, {}, probeUpstream, {
+				falseBranch: false,
+			});
+			// 取最後一條 —— 那是「定義這個節點輸出」的語句
+			// （FILTER 的 false 分支、ASSERT 的守門都排在它後面）。
+			const last = stmts[stmts.length - 1];
+			try {
+				conn.query(`EXPLAIN ${last}`);
+			} catch (err) {
+				unplannable.push(`${t}: ${String(err.message).split("\n")[0].slice(0, 70)}`);
+			}
+		}
+		add("every node type's compiled statement can be planned (EXPLAIN binds it)",
+			unplannable, []);
+	}
+
 	// 14c. 目錄的輸入埠數與 resolveSourceTables 的行為一致
 	//      （inputs >= 2 的節點必須拿得到兩個上游）
 	const twoInput = catalogTypes.filter((t) => catalog.NODE_CATALOG[t].inputs === 2);
