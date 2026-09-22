@@ -15,6 +15,7 @@ import type { Edge, Node } from "@xyflow/react";
 import { orderUpstreamSources, topologicalSort } from "./scheduler";
 import { compileNodeSelect, resolveSourceTables, requiredExtensions } from "./astCompiler";
 import { qi } from "./sql";
+import { narrateNode } from "./narrate";
 
 // ---------------------------------------------------------------------------
 // SQL CTE 匯出
@@ -71,7 +72,14 @@ export function exportToSqlCte(
 	const hasOutgoing = new Set(edges.map((e) => e.source));
 	const externalSources = new Set<string>();
 	const skipped: string[] = [];
-	const ctes: { id: string; label: string; type: string; body: string }[] = [];
+	const ctes: {
+		id: string;
+		label: string;
+		type: string;
+		body: string;
+		/** 這個節點的人話說明（見 narrate.ts），會寫成匯出腳本裡的註解 */
+		narration: string;
+	}[] = [];
 	// 需要 DuckDB 擴充的節點 → 腳本開頭要補 LOAD。
 	// 不能塞進 WITH 裡面：LOAD 是一條獨立語句，WITH ... SELECT 是一條語句。
 	const extensions = new Set<string>();
@@ -110,7 +118,20 @@ export function exportToSqlCte(
 			if (body.includes(src)) externalSources.add(src);
 		}
 
-		ctes.push({ id, label, type, body });
+		// 管線說明：**確定性**地由 config 推導（見 engine/narrate.ts），
+		// 不是叫 LLM 寫。讓模型自由描述一張圖會產生「看起來合理但不存在的步驟」。
+		// 寫進匯出腳本當註解，零 LLM 成本就有大部分價值 —— 拿到腳本的人不必
+		// 反推每一段 SQL 在做什麼。
+		const narration = narrateNode({
+			type,
+			config: (data.config || {}) as Record<string, unknown>,
+			upstreamLabels: upstream.map((uid) => {
+				const up = byId.get(uid);
+				return up ? (up.data as any)?.label || uid : uid;
+			}),
+		});
+
+		ctes.push({ id, label, type, body, narration });
 	}
 
 	// ---- 終點選擇 ----
@@ -172,6 +193,7 @@ export function exportToSqlCte(
 	ctes.forEach((cte, i) => {
 		const comma = i < ctes.length - 1 ? "," : "";
 		lines.push(`-- ${cte.label} (${cte.type})`);
+		lines.push(`-- ${cte.narration}`);
 		lines.push(`${qi(cte.id)} AS (`);
 		lines.push(indentBlock(cte.body, 4));
 		lines.push(`)${comma}`);

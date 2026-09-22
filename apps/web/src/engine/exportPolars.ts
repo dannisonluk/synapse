@@ -15,6 +15,7 @@ import type { Edge, Node } from "@xyflow/react";
 import { orderUpstreamSources, topologicalSort } from "./scheduler";
 import { resolveSourceTables, falseBranchTable } from "./astCompiler";
 import { safeOp, safeFunc, safeJoinType, safeFuzzyJoinType, safeExpr, safeUnionMode, safeSampleMode, safeImputeMethod, safeRankMethod, safeUnmatched, safeRegexMode, regexPattern, safeMultiFieldOutputMode, safeNewFieldSuffix, hasCurrentField, applyCurrentField, safeSplitMode, safeMatchFunc, matchIsSimilarity, matchThreshold, safePrefilter, safeScoreColumn, safeOutputFormat, safeOutputFileName, safeAssertCheck, safeAssertBound, safeAssertLabel, intLit } from "./sql";
+import { narrateNode } from "./narrate";
 
 // ---------------------------------------------------------------------------
 // Python literal / identifier
@@ -1318,7 +1319,14 @@ export function exportToPolars(
 	const notes: string[] = [];
 	/** 需要在腳本開頭注入的輔助函式（Set 去重：多個 FUZZY_JOIN 只注入一次） */
 	const neededHelpers = new Set<string>();
-	const blocks: { id: string; label: string; type: string; code: string }[] = [];
+	const blocks: {
+		id: string;
+		label: string;
+		type: string;
+		code: string;
+		/** 這個節點的人話說明（見 narrate.ts），會寫成腳本裡的註解 */
+		narration: string;
+	}[] = [];
 
 	for (const id of order) {
 		const node = byId.get(id);
@@ -1352,7 +1360,19 @@ export function exportToPolars(
 		if (ctx.needsReview) needsReview.push(id);
 		for (const n of ctx.notes) notes.push(n);
 		for (const h of ctx.helpers) neededHelpers.add(h);
-		blocks.push({ id, label, type, code });
+
+		// 管線說明：確定性地由 config 推導（見 narrate.ts），寫成腳本裡的註解。
+		// 與 SQL 匯出走同一份推導 —— 兩邊的說明不會互相矛盾。
+		const narration = narrateNode({
+			type,
+			config: (data.config || {}) as Record<string, unknown>,
+			upstreamLabels: upstream.map((uid) => {
+				const up = byId.get(uid);
+				return up ? (up.data as any)?.label || uid : uid;
+			}),
+		});
+
+		blocks.push({ id, label, type, code, narration });
 	}
 
 	// ---- 終點 ----
@@ -1423,6 +1443,7 @@ export function exportToPolars(
 
 	for (const b of blocks) {
 		lines.push(`# --- ${b.label} (${b.type}) ---`);
+		lines.push(`# ${b.narration}`);
 		lines.push(b.code);
 		lines.push("");
 	}
