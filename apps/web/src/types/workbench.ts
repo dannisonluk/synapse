@@ -19,6 +19,7 @@ export type AlteryxNodeType =
 	| "FUZZY_JOIN"
 	| "SPATIAL_MATCH"
 	| "OUTPUT"
+	| "ASSERT"
 	| "SORT"
 	| "SELECT"
 	| "UNION"

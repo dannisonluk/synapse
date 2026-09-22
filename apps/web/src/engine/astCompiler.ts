@@ -40,6 +40,9 @@ import {
 	safeDistanceUnit,
 	safeSpatialJoinType,
 	safeDistanceColumn,
+	safeAssertCheck,
+	safeAssertBound,
+	safeAssertLabel,
 	intLit,
 } from "./sql";
 import type { Edge } from "@xyflow/react";
@@ -569,6 +572,16 @@ export function compileNodeSelect(
 			return `SELECT * FROM ${qi(sourceTable)}`;
 		}
 
+		case "ASSERT": {
+			// 本體是 passthrough —— 檢查不改變資料，只決定「要不要讓流程繼續」。
+			// 守門陳述是**額外的一條語句**，由 compileNodeStatements 補上。
+			//
+			// 為什麼不把檢查塞進本體（例如 WHERE 掉違反的列）：那會讓 ASSERT
+			// 變成一個「悄悄刪資料」的節點，而它的職責剛好相反 —— 資料不對時
+			// 要大聲失敗，不是安靜地少幾列。
+			return `SELECT * FROM ${qi(sourceTable)}`;
+		}
+
 		case "SORT": {
 			// field 優先（UI 表單綁定 field）；groupBy 保留作為 Hermes 舊 payload 的
 			// fallback —— 但它現在可能是陣列（SUMMARIZE 的多分組鍵），取第一個即可。
@@ -875,9 +888,112 @@ export function producesOutputTable(nodeType: string): boolean {
 }
 
 /**
+ * ASSERT 的守門陳述。
+ *
+ * 機制是**實測**出來的，不是假設。DuckDB 有 scalar 函式 `error(msg)`，會讓整個
+ * query 失敗；關鍵是它**不會被常數折疊**，所以放在外層的 WHERE 之後就只有真的
+ * 違反時才觸發：
+ *   SELECT error('boom') FROM (VALUES (1)) t(a) WHERE a = 2;  → OK（0 列命中）
+ *   SELECT error('boom') FROM (VALUES (1)) t(a) WHERE a = 1;  → Invalid Input Error: boom
+ *
+ * 兩個被實測淘汰的替代方案（不要走回去）：
+ *   - `1 / 0` → 回 Infinity，**不會**拋錯。
+ *   - `ALTER TABLE ... ADD CONSTRAINT CHECK` → 這個 build 未實作
+ *     （Not implemented Error: No support for that ALTER TABLE option yet!）。
+ *
+ * 四個檢查共用同一個形狀：先在子查詢裡把「違反的數量」算成 n，外層再據此決定
+ * 要不要呼叫 error()。這樣做有兩個好處：
+ *   1. 訊息可以帶上**真實數字**（「有 1 列 NULL」而不是「有 NULL」）。
+ *   2. error() 的參數相依於資料，因此不可能被最佳化器提前求值。
+ *
+ * 訊息一律由這裡組，不讓使用者自由填寫 —— 它會變成 error() 的參數，那就是一條
+ * 字串注入路徑。使用者可控的只有 assertLabel，而它已被 safeAssertLabel 收斂。
+ */
+function assertGuardStatement(nodeId: string, config: NodeConfig): string | null {
+	const check = safeAssertCheck(config.assertCheck);
+	const table = qi(nodeId);
+	const label = safeAssertLabel(config.assertLabel, check);
+	// 訊息拆成「前綴 + 數字 + 後綴」三段，**每一段各自過 strLit**。
+	//
+	// 為什麼不能像第一版那樣直接把字串插進 '...'：訊息裡含欄位名，而欄位名是
+	// 使用者可控的。一個叫 `a'b` 的欄位就會提早關掉字面值，變成注入路徑。
+	// strLit 會把 ' 加倍，所以三段都走它。數字則單獨用 CAST(n AS VARCHAR) 串接。
+	//
+	// 反面教材（第一版的寫法，已修）：
+	//   error('ASSERT x: ' || CAST(n AS VARCHAR) || ' 列 "a'b" 為 NULL')
+	const fail = (suffix: string, prefix = `ASSERT ${label}: `) =>
+		`error(${strLit(prefix)} || CAST(n AS VARCHAR) || ${strLit(suffix)})`;
+
+	switch (check) {
+		case "NOT_NULL": {
+			const col = toNameList(config.assertColumn, ["id"])[0] || "id";
+			return (
+				`SELECT ${fail(` 列「${col}」為 NULL`)} ` +
+				`FROM (SELECT COUNT(*) AS n FROM ${table} WHERE ${qi(col)} IS NULL) WHERE n > 0;`
+			);
+		}
+
+		case "UNIQUE": {
+			// 逐欄 quote。把 "a, b" 當成單一識別字會得到
+			// Binder Error: Referenced column "a, b" not found —— 探針踩過。
+			const cols = toNameList(config.assertColumn, ["id"]);
+			const key = cols.map(qi).join(", ");
+			const shown = cols.join(" + ");
+			return (
+				`SELECT ${fail(` 組組合鍵「${shown}」重複`)} ` +
+				`FROM (SELECT COUNT(*) AS n FROM (SELECT 1 FROM ${table} GROUP BY ${key} HAVING COUNT(*) > 1)) ` +
+				`WHERE n > 0;`
+			);
+		}
+
+		case "ROW_COUNT": {
+			const min = safeAssertBound(config.assertMin);
+			const max = safeAssertBound(config.assertMax);
+			// 兩個都沒填 = 不檢查。回 null 讓整條守門都不產生，而不是產生一條
+			// 永遠成立的語句 —— 那只是每次執行都白跑一次 COUNT(*)。
+			if (min === null && max === null) return null;
+			const conds: string[] = [];
+			if (min !== null) conds.push(`n < ${min}`);
+			if (max !== null) conds.push(`n > ${max}`);
+			// 邊界用裸數字，**不經 intLit** —— intLit 會 Math.floor 並把負數
+			// 夾成 0（它原本是給 LIMIT/OFFSET 用的）。safeAssertBound 已經保證
+			// 這裡是有限數字，直接用就好。
+			const range =
+				min !== null && max !== null
+					? `${min}..${max}`
+					: min !== null
+						? `>= ${min}`
+						: `<= ${max}`;
+			return (
+				`SELECT ${fail(` 不在 ${range} 之內`, `ASSERT ${label}: 列數 `)} ` +
+				`FROM (SELECT COUNT(*) AS n FROM ${table}) WHERE ${conds.join(" OR ")};`
+			);
+		}
+
+		case "PREDICATE": {
+			// safeExpr 做結構性拒絕（擋多語句與註解），與 FORMULA 同一條守門。
+			const pred = safeExpr(config.assertPredicate, "TRUE");
+			// NOT COALESCE(pred, FALSE) 而非 NOT (pred)：pred 為 NULL 時
+			// DuckDB 的 NOT 仍是 NULL，那一列會「不算違反」而溜過去 ——
+			// 但述句無法判斷本身就是資料有問題。實測 bad 資料上
+			// `amount > 0` 抓到 2 列（負數 + NULL），naive 版只抓到 1 列。
+			return (
+				`SELECT ${fail(" 列讓述句為假")} ` +
+				`FROM (SELECT COUNT(*) AS n FROM ${table} WHERE NOT COALESCE((${pred}), FALSE)) ` +
+				`WHERE n > 0;`
+			);
+		}
+
+		default:
+			return null;
+	}
+}
+
+/**
  * 節點執行時真正要跑的 SQL 語句清單。
  *
- * 大多數節點是 1 條；FILTER 是 2 條（true 表 + false 表）。
+ * 大多數節點是 1 條；FILTER 是 2 條（true 表 + false 表）；
+ * ASSERT 是 2 條（passthrough 表 + 守門）。
  * 之所以能用單一次 `query()` 送出多條語句：已對 duckdb-wasm 1.32.0
  * 實測 `"CREATE ...; CREATE ...;"` 兩條都會生效（DuckDB 的 query 路徑本身
  * 支援多語句），因此不需要在引擎 RPC 介面上另開一個 op。
@@ -920,6 +1036,14 @@ export function compileNodeStatements(
 		statements.push(
 			`CREATE OR REPLACE TEMP TABLE ${qi(falseBranchTable(nodeId))} AS SELECT * FROM ${qi(sourceTable)} WHERE NOT COALESCE((${filterCondition(config)}), FALSE);`,
 		);
+	}
+
+	// ASSERT 的守門排在建表**之後**，這是刻意的：守門拋錯時表已經存在，
+	// 所以使用者可以去 Data Drawer 直接看是哪幾列違反（實測確認表會留下）。
+	// 若反過來先驗再建表，失敗時就只剩一句訊息、看不到證據。
+	if (nodeType === "ASSERT") {
+		const guard = assertGuardStatement(nodeId, config);
+		if (guard) statements.push(guard);
 	}
 
 	return statements;

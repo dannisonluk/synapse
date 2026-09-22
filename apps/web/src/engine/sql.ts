@@ -229,6 +229,62 @@ export function safeOutputFileName(
 }
 
 /**
+ * ASSERT 節點的檢查種類白名單。
+ *
+ *   NOT_NULL   → 指定欄位不得為 NULL
+ *   UNIQUE     → 指定欄位的值必須唯一（含組合鍵）
+ *   ROW_COUNT  → 總列數必須落在 [min, max] 之間
+ *   PREDICATE  → 自訂述句，**不得**有任何一列讓它為假
+ *
+ * 刻意不做「資料型別」檢查：DuckDB 是強型別的，型別錯了在 binder 階段就會炸，
+ * 輪不到 ASSERT 來守。
+ */
+export const ASSERT_CHECKS = [
+	"NOT_NULL",
+	"UNIQUE",
+	"ROW_COUNT",
+	"PREDICATE",
+] as const;
+
+const ALLOWED_ASSERT_CHECKS = new Set<string>(ASSERT_CHECKS);
+
+export function safeAssertCheck(c: unknown, fallback = "NOT_NULL"): string {
+	const normalized = String(c ?? "").trim().toUpperCase().replace(/\s+/g, "_");
+	return ALLOWED_ASSERT_CHECKS.has(normalized) ? normalized : fallback;
+}
+
+/**
+ * ASSERT 的數值邊界（ROW_COUNT 的 min / max）。
+ *
+ * 空字串與非數字一律視為「不設限」回 null —— 不是回 0。
+ * 回 0 會讓「只填下限」變成「上限 0」，於是每一張表都違反，錯誤訊息還指向
+ * 一個使用者從沒輸入過的數字。
+ */
+export function safeAssertBound(value: unknown): number | null {
+	if (value === null || value === undefined) return null;
+	const s = String(value).trim();
+	if (!s) return null;
+	const n = Number(s);
+	return Number.isFinite(n) ? n : null;
+}
+
+/**
+ * ASSERT 失敗訊息的前綴。
+ *
+ * 訊息會進到 error() 的參數，所以**必須**由這裡產生而不是讓使用者自由填寫 ——
+ * 否則就多了一條字串注入路徑（`'` 可以逃逸出字面值）。使用者自訂的部分只留
+ * 「檢查名稱」，而它只允許英數字與底線。
+ */
+export function safeAssertLabel(value: unknown, fallback = ""): string {
+	return String(value ?? "")
+		.trim()
+		// 只留英數字、底線、連字號與空白，其餘一律拿掉
+		.replace(/[^A-Za-z0-9_\- ]/g, "")
+		.slice(0, 60)
+		.trim() || fallback;
+}
+
+/**
  * UNION 的欄位對齊方式。
  *   BY_NAME  → `UNION ALL BY NAME`：按欄位名對齊，缺欄位補 NULL（Alteryx 的 Union 語意）
  *   POSITION → `UNION ALL`：按位置對齊

@@ -16,6 +16,7 @@ export const GENERATED_FROM = "apps/web/src/engine/nodeCatalog.ts";
 export const NODE_TYPES = [
 	"INPUT_DUCKDB",
 	"OUTPUT",
+	"ASSERT",
 	"DATA_CLEANSING",
 	"FILTER",
 	"FORMULA",
@@ -79,6 +80,14 @@ export const NODE_FIELDS: { readonly [K in NodeType]: readonly FieldSpec[] } = {
 	OUTPUT: [
 		{ name: "fileName", kind: "text", label: "輸出檔名", required: false },
 		{ name: "outputFormat", kind: "enum", label: "格式", required: false, values: ["CSV", "JSON"] },
+	],
+	ASSERT: [
+		{ name: "assertCheck", kind: "enum", label: "檢查", required: false, values: ["NOT_NULL", "UNIQUE", "ROW_COUNT", "PREDICATE"] },
+		{ name: "assertColumn", kind: "text", label: "欄位", required: false },
+		{ name: "assertMin", kind: "text", label: "列數下限", required: false },
+		{ name: "assertMax", kind: "text", label: "列數上限", required: false },
+		{ name: "assertPredicate", kind: "text", label: "述句", required: false },
+		{ name: "assertLabel", kind: "text", label: "檢查名稱", required: false },
 	],
 	DATA_CLEANSING: [
 		{ name: "columns", kind: "fieldList", label: "要清理的欄位", required: true },
@@ -225,6 +234,7 @@ export const NODE_FIELDS: { readonly [K in NodeType]: readonly FieldSpec[] } = {
 export const NODE_META: { readonly [K in NodeType]: NodeMeta } = {
 	INPUT_DUCKDB: { label: "Input Data", category: "In/Out", description: "從 DuckDB 資料表或上傳的 CSV / Parquet 檔載入資料。", inputs: 0 },
 	OUTPUT: { label: "Output Data", category: "In/Out", description: "標記工作流的輸出，並可把結果下載成 CSV / JSON 檔。", inputs: 1 },
+	ASSERT: { label: "Assert", category: "Preparation", description: "資料品質閘門：條件不成立就讓節點失敗，並擋掉所有下游。", inputs: 1 },
 	DATA_CLEANSING: { label: "Data Cleansing", category: "Preparation", description: "清理文字欄位：去頭尾空白、壓縮內部連續空白、空字串轉 NULL。", inputs: 1 },
 	FILTER: { label: "Filter", category: "Preparation", description: "依條件保留列，並產生 true / false 兩個輸出分支。", inputs: 1 },
 	FORMULA: { label: "Formula", category: "Preparation", description: "用運算式新增一個欄位（DuckDB scalar expression）。", inputs: 1 },

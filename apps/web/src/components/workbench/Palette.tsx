@@ -27,6 +27,7 @@ import {
 	Fingerprint,
 	MapPin,
 	Download,
+	ShieldCheck,
 	type LucideIcon,
 } from "lucide-react";
 import { useTheme } from "../../theme/ThemeContext";
@@ -74,6 +75,7 @@ const ICONS: Record<string, LucideIcon> = {
 	Fingerprint,
 	MapPin,
 	Download,
+	ShieldCheck,
 };
 
 /** 供驗證腳本斷言「目錄用到的 icon 名稱這裡都有」 */

@@ -14,7 +14,7 @@
 import type { Edge, Node } from "@xyflow/react";
 import { orderUpstreamSources, topologicalSort } from "./scheduler";
 import { resolveSourceTables, falseBranchTable } from "./astCompiler";
-import { safeOp, safeFunc, safeJoinType, safeFuzzyJoinType, safeExpr, safeUnionMode, safeSampleMode, safeImputeMethod, safeRankMethod, safeUnmatched, safeRegexMode, regexPattern, safeMultiFieldOutputMode, safeNewFieldSuffix, hasCurrentField, applyCurrentField, safeSplitMode, safeMatchFunc, matchIsSimilarity, matchThreshold, safePrefilter, safeScoreColumn, safeOutputFormat, safeOutputFileName, intLit } from "./sql";
+import { safeOp, safeFunc, safeJoinType, safeFuzzyJoinType, safeExpr, safeUnionMode, safeSampleMode, safeImputeMethod, safeRankMethod, safeUnmatched, safeRegexMode, regexPattern, safeMultiFieldOutputMode, safeNewFieldSuffix, hasCurrentField, applyCurrentField, safeSplitMode, safeMatchFunc, matchIsSimilarity, matchThreshold, safePrefilter, safeScoreColumn, safeOutputFormat, safeOutputFileName, safeAssertCheck, safeAssertBound, safeAssertLabel, intLit } from "./sql";
 
 // ---------------------------------------------------------------------------
 // Python literal / identifier
@@ -129,7 +129,15 @@ function tokenizeExpr(src: string): Token[] | null {
 			i += m[0].length;
 			continue;
 		}
-		if ("+-*/%(),".includes(c)) {
+		// 比較運算子。兩字元的要先試，否則 `>=` 會被拆成 `>` 與 `=`，
+		// 產出 `pl.col("a") > = 0`（Python 語法錯誤）。
+		const two = src.slice(i, i + 2);
+		if (two === ">=" || two === "<=" || two === "<>" || two === "!=") {
+			toks.push({ kind: "op", text: two });
+			i += 2;
+			continue;
+		}
+		if ("+-*/%(),=<>".includes(c)) {
 			toks.push({ kind: "op", text: c });
 			i++;
 			continue;
@@ -184,7 +192,20 @@ export function translateExprToPolars(src: string): string | null {
 			}
 
 			if (t.kind === "op") {
-				out += t.text;
+				// SQL 的比較運算子要換成 Python 的寫法：
+				//   `=`  → `==`   （SQL 的等於；Python 的 `=` 是賦值）
+				//   `<>` → `!=`   （SQL 標準的不等於）
+				// 其餘（`>=` `<=` `>` `<` `!=`）兩邊寫法相同，原樣輸出。
+				//
+				// ⚠ 為什麼 AND / OR / NOT 仍然拒絕（在 REJECT_KEYWORDS 裡）：
+				// Python 的位元運算子優先級與 SQL 的關鍵字相反 —— `&` 比比較
+				// 運算子**綁得更緊**，所以 `a >= 0 AND b <= 1` 若天真地譯成
+				// `a >= 0 & b <= 1`，會被 Python 讀成 `a >= (0 & b) <= 1`：
+				// 一個**連鎖比較**，不拋錯、結果卻是垃圾。要正確處理就得寫一個
+				// 帶優先級的剖析器，而不是現在這個平坦的產生器。
+				// 因此維持拒絕，並要求「一個 ASSERT 一個條件」—— 這對診斷
+				// 反而更好：多個條件就開多個節點，失敗時一眼看出是哪一條。
+				out += t.text === "=" ? "==" : t.text === "<>" ? "!=" : t.text;
 				i++;
 				continue;
 			}
@@ -786,6 +807,118 @@ function emitNode(
 				`${id} = ${src}`,
 				`${id}.${writer}(${pyStr(name)})  # 匯出 → ${name}`,
 			].join("\n");
+		}
+
+		case "ASSERT": {
+			// 這裡是少數「Polars 端比 DuckDB 端更乾淨」的地方：Python 有真正的
+			// raise，不需要像 SQL 那邊繞道 error() 函式。兩邊的**語意**必須一致
+			// （同樣的條件、同樣的訊息、同樣擋掉下游），只有語法不同。
+			//
+			// 訊息格式刻意與 SQL 端一字不差：使用者在畫布上看到的錯誤訊息，
+			// 與匯出腳本跑出來的一樣，否則「同一條斷言」在兩邊會有兩種說法。
+			const check = safeAssertCheck(config?.assertCheck);
+			const label = safeAssertLabel(config?.assertLabel, check);
+			const lines = [`${id} = ${src}`];
+			// 臨時變數加節點前綴：同一個腳本裡多個 ASSERT 不會互相蓋掉。
+			const tmp = `_as_${id}`;
+
+			/**
+			 * f-string 內的字面文字。
+			 *
+			 * 為什麼需要：訊息裡會嵌欄位名，而欄位名是使用者可控的。直接塞進
+			 * `f"... {n} 列 "col" 為 NULL"` 會在內層雙引號處**提早結束字串** ——
+			 * 那不是注入，是直接的 Python 語法錯誤（第一版就是這樣，一印出來
+			 * 就看到）。所以雙引號一律換成單引號（訊息只給人看，不影響語意），
+			 * 大括號加倍，反斜線逃逸。
+			 */
+			const ftext = (text: unknown) =>
+				String(text ?? "")
+					.replace(/\\/g, "\\\\")
+					.replace(/"/g, "'")
+					.replace(/\{/g, "{{")
+					.replace(/\}/g, "}}");
+
+			if (check === "NOT_NULL") {
+				const col = String(config?.assertColumn ?? "").split(",")[0].trim() || "id";
+				lines.push(
+					`${tmp} = ${id}.filter(pl.col(${pyStr(col)}).is_null()).height`,
+					`if ${tmp} > 0:`,
+					`    raise ValueError(f"ASSERT ${label}: {${tmp}}${ftext(` 列「${col}」為 NULL`)}")`,
+				);
+			} else if (check === "UNIQUE") {
+				const cols = String(config?.assertColumn ?? "")
+					.split(",")
+					.map((c) => c.trim())
+					.filter(Boolean);
+				const keys = cols.length > 0 ? cols : ["id"];
+				const shown = keys.join(" + ");
+				lines.push(
+					`${tmp} = ${id}.group_by([${keys.map(pyStr).join(", ")}]).agg(pl.len().alias("__n")).filter(pl.col("__n") > 1).height`,
+					`if ${tmp} > 0:`,
+					`    raise ValueError(f"ASSERT ${label}: {${tmp}}${ftext(` 組組合鍵「${shown}」重複`)}")`,
+				);
+			} else if (check === "ROW_COUNT") {
+				const min = safeAssertBound(config?.assertMin);
+				const max = safeAssertBound(config?.assertMax);
+				if (min === null && max === null) {
+					// 與 SQL 端一致：兩個都沒填就完全不產生守門。
+					ctx.notes.push(
+						`節點 ${id}：ASSERT 的列數上下限都沒填 → 這個節點不會檢查任何東西`,
+					);
+				} else {
+					// 條件只由「真的有填」的邊界組成。
+					// 第一版寫成 `(lo is None or n >= lo) and (hi is None or n <= hi)`
+					// —— 靠 Python 的 or 短路才不會去比較 None。語意上沒錯，
+					// 但它把「沒填」編碼成一個**執行期才會走到的分支**，
+					// 而這其實是編譯期就知道的事實。直接不產生那一半。
+					const cond =
+						min !== null && max !== null
+							? `${min} <= ${tmp} <= ${max}`
+							: min !== null
+								? `${tmp} >= ${min}`
+								: `${tmp} <= ${max}`;
+					const range =
+						min !== null && max !== null
+							? `${min}..${max}`
+							: min !== null
+								? `>= ${min}`
+								: `<= ${max}`;
+					lines.push(
+						`${tmp} = ${id}.height`,
+						`if not (${cond}):`,
+						`    raise ValueError(f"ASSERT ${label}: 列數 {${tmp}}${ftext(` 不在 ${range} 之內`)}")`,
+					);
+				}
+			} else if (check === "PREDICATE") {
+				const raw = safeExpr(config?.assertPredicate, "TRUE");
+				const translated = translateExprToPolars(raw);
+				if (translated === null) {
+					// 翻譯不了就**大聲拒絕**，不要安靜地不檢查 ——
+					// 一個「永遠通過」的斷言比沒有斷言更危險，因為它會讓人以為
+					// 資料被守住了。
+					ctx.needsReview = true;
+					ctx.notes.push(
+						`節點 ${id} 的 ASSERT 述句無法自動翻譯（${raw}）→ 這個斷言在匯出的腳本裡**不會執行**，請手動改寫`,
+					);
+					lines.push(
+						`# TODO: ASSERT 述句無法自動翻譯 → ${raw}`,
+						`# ⚠ 這個斷言沒有生效，請手動補上檢查`,
+					);
+				} else {
+					lines.push(
+						// `.fill_null(True)` 不是裝飾：Polars 的 `~None` 仍是 None，
+						// 而 filter(None) 會把那一列**丟掉** → 述句為 NULL 的列會
+						// 溜過檢查。SQL 端用的是 `NOT COALESCE(pred, FALSE)`，
+						// 把 NULL 視為違反；這裡必須對齊，否則同一條斷言在兩邊
+						// 抓到的列數不同（而 NULL 述句本身就是資料有問題）。
+						`${tmp} = ${id}.filter((~(${translated})).fill_null(True)).height`,
+						`if ${tmp} > 0:`,
+						`    raise ValueError(f"ASSERT ${label}: {${tmp}} 列讓述句為假")`,
+					);
+				}
+			}
+
+			return lines.join("\n");
 		}
 
 		case "SPATIAL_MATCH": {

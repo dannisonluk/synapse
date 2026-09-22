@@ -25,6 +25,8 @@ import {
 	safeDistanceUnit,
 	safeOutputFormat,
 	safeOutputFileName,
+	safeAssertCheck,
+	safeAssertBound,
 } from "../../../engine/sql";
 import { toCsv } from "../../../engine/csv";
 import { downloadText } from "../../../lib/download";
@@ -1514,6 +1516,125 @@ export const AlteryxNode: React.FC<NodeProps<Node<AlteryxNodeData>>> = ({
 							<div className="text-[9px] font-mono opacity-50 leading-tight">
 								這個節點在畫布上只是命名的終點（結果留在記憶體，可下載）；
 								真的寫成檔案是 Polars 匯出腳本裡的 write_csv / write_json。
+							</div>
+						</div>
+					);
+				})()}
+
+				{/* 5e. ASSERT 節點介面 */}
+				{nodeType === "ASSERT" && (() => {
+					const check = safeAssertCheck(config.assertCheck);
+					const needsColumn = check === "NOT_NULL" || check === "UNIQUE";
+					const needsRange = check === "ROW_COUNT";
+					const needsPredicate = check === "PREDICATE";
+					const minBound = safeAssertBound(config.assertMin);
+					const maxBound = safeAssertBound(config.assertMax);
+					// 與編譯器同一條規則：列數上下限都沒填 → 這個節點不檢查任何東西。
+					// 這種「看起來有守、其實沒守」的狀態一定要在畫面上講出來，
+					// 因為它比沒有斷言更危險。
+					const isNoop =
+						(needsRange && minBound === null && maxBound === null) ||
+						(needsPredicate &&
+							!String(config.assertPredicate ?? "").trim());
+					return (
+						<div
+							className={`p-2 rounded border space-y-1 ${
+								isLight
+									? "bg-stone-50/80 border-stone-200/60"
+									: "bg-slate-900/60 border-slate-800"
+							}`}
+						>
+							<div className="text-[9px] font-bold font-mono tracking-wider opacity-60 uppercase">
+								Assert
+							</div>
+
+							<select
+								value={check}
+								onChange={(e) => updateConfig("assertCheck", e.target.value)}
+								className={`w-full ${selectCls}`}
+							>
+								<option value="NOT_NULL">NOT_NULL — 欄位不得為空</option>
+								<option value="UNIQUE">UNIQUE — 欄位或組合鍵必須唯一</option>
+								<option value="ROW_COUNT">ROW_COUNT — 列數落在範圍內</option>
+								<option value="PREDICATE">PREDICATE — 述句不得為假</option>
+							</select>
+
+							{needsColumn && (
+								<>
+									<FieldInput
+										listId={`as-col-${id}`}
+										options={upstream.columns}
+										value={String(config.assertColumn ?? "")}
+										onValueChange={(v) => updateConfig("assertColumn", v)}
+										placeholder={
+											check === "UNIQUE" ? "id, year（可做組合鍵）" : "id"
+										}
+										className={`w-full ${inputCls}`}
+									/>
+									{check === "UNIQUE" && (
+										<div className="text-[9px] font-mono opacity-50">
+											多個欄位用逗號分隔 → 檢查的是「組合鍵」的唯一性。
+										</div>
+									)}
+									<MissingFieldWarning
+										field={String(config.assertColumn ?? "")
+											.split(",")[0]
+											.trim()}
+										options={upstream.columns}
+									/>
+								</>
+							)}
+
+							{needsRange && (
+								<div className="flex space-x-1">
+									<input
+										value={String(config.assertMin ?? "")}
+										onChange={(e) => updateConfig("assertMin", e.target.value)}
+										placeholder="下限"
+										title="留空 = 不設限（不是 0）"
+										className={`flex-1 ${inputCls}`}
+									/>
+									<input
+										value={String(config.assertMax ?? "")}
+										onChange={(e) => updateConfig("assertMax", e.target.value)}
+										placeholder="上限"
+										title="留空 = 不設限"
+										className={`flex-1 ${inputCls}`}
+									/>
+								</div>
+							)}
+
+							{needsPredicate && (
+								<input
+									value={String(config.assertPredicate ?? "")}
+									onChange={(e) =>
+										updateConfig("assertPredicate", e.target.value)
+									}
+									placeholder="amount >= 0"
+									title="不得有任何一列讓這個述句為假"
+									className={`w-full ${inputCls}`}
+								/>
+							)}
+
+							<input
+								value={String(config.assertLabel ?? "")}
+								onChange={(e) => updateConfig("assertLabel", e.target.value)}
+								placeholder="檢查名稱（選填）"
+								title="只給人看，會出現在失敗訊息裡"
+								className={`w-full ${inputCls}`}
+							/>
+
+							{isNoop && (
+								<div className="text-[9px] font-mono text-amber-500 leading-tight">
+									⚠ 目前設定不會檢查任何東西（
+									{needsRange ? "列數上下限都沒填" : "述句是空的"}）
+									—— 這比沒有斷言更危險，因為它看起來有守。
+								</div>
+							)}
+
+							<div className="text-[9px] font-mono opacity-50 leading-tight">
+								條件不成立時這個節點會失敗，並自動擋掉所有下游。
+								失敗前輸出表已經建立 → 可以直接去 Data Drawer 看是哪幾列違反。
 							</div>
 						</div>
 					);

@@ -834,6 +834,74 @@ export const NODE_CATALOG: Record<AlteryxNodeType, NodeSpec> = {
 		],
 	},
 
+	ASSERT: {
+		type: "ASSERT",
+		label: "Assert",
+		category: "Preparation",
+		description: "資料品質閘門：條件不成立就讓節點失敗，並擋掉所有下游。",
+		whenToUse:
+			"使用者說「確保 / 檢查 / 驗證 / 不得為空 / 必須唯一 / 不要有重複 / " +
+			"列數要在某個範圍 / 資料品質 / assert / validate」時。" +
+			"它不改資料，只是在上游結果上守一條規則。",
+		inputs: 1,
+		nodeType: "alteryxNode",
+		icon: "ShieldCheck",
+		color: "text-rose-500",
+		defaults: {
+			assertCheck: "NOT_NULL",
+			assertColumn: "id",
+			assertMin: "",
+			assertMax: "",
+			assertPredicate: "amount >= 0",
+			assertLabel: "",
+		},
+		fields: [
+			{
+				name: "assertCheck",
+				kind: "enum",
+				label: "檢查",
+				values: ["NOT_NULL", "UNIQUE", "ROW_COUNT", "PREDICATE"],
+				default: "NOT_NULL",
+				hint: "條件不成立時這個節點會失敗，並擋掉所有下游節點。",
+			},
+			{
+				name: "assertColumn",
+				kind: "text",
+				label: "欄位",
+				default: "id",
+				hint: "NOT_NULL / UNIQUE 用。UNIQUE 可用逗號分隔做組合鍵（例如 a, b）。",
+			},
+			{
+				name: "assertMin",
+				kind: "text",
+				label: "列數下限",
+				default: "",
+				hint: "ROW_COUNT 用。留空 = 不設限（不是 0）。",
+			},
+			{
+				name: "assertMax",
+				kind: "text",
+				label: "列數上限",
+				default: "",
+				hint: "ROW_COUNT 用。留空 = 不設限。",
+			},
+			{
+				name: "assertPredicate",
+				kind: "text",
+				label: "述句",
+				default: "amount >= 0",
+				hint: "PREDICATE 用。不得有任何一列讓它為假。",
+			},
+			{
+				name: "assertLabel",
+				kind: "text",
+				label: "檢查名稱",
+				default: "",
+				hint: "只給人看，會出現在失敗訊息裡。留空則用檢查種類當名稱。",
+			},
+		],
+	},
+
 	UNION: {
 		type: "UNION",
 		label: "Union",

@@ -4,6 +4,7 @@
   "types": [
     "INPUT_DUCKDB",
     "OUTPUT",
+    "ASSERT",
     "DATA_CLEANSING",
     "FILTER",
     "FORMULA",
@@ -33,6 +34,12 @@
   "hintKeys": [
     "fileName",
     "outputFormat",
+    "assertCheck",
+    "assertColumn",
+    "assertMin",
+    "assertMax",
+    "assertPredicate",
+    "assertLabel",
     "columns",
     "field",
     "op",
@@ -84,7 +91,7 @@
     "xAxis",
     "yAxis"
   ],
-  "promptSection": "- INPUT_DUCKDB: {\"tableName\": \"<字串>\", \"fileName\": \"<字串>\"}  — 從 DuckDB 資料表或上傳的 CSV / Parquet 檔載入資料。 用途：每個 pipeline 的起點。使用者在畫布上已有資料時，改連現有節點即可，不要另開一個 Input。\n- OUTPUT: {\"fileName\": \"<字串>\", \"outputFormat\": \"CSV\" | \"JSON\"}  — 標記工作流的輸出，並可把結果下載成 CSV / JSON 檔。 用途：使用者說「輸出 / 下載 / 匯出成檔案 / 存成 CSV / output / export / 給我一份檔案」時。它不改資料，只是把上游結果標成明確的終點。\n- DATA_CLEANSING: {\"columns\": [\"<欄位名>\", ...], \"trim\": true | false, \"collapse\": true | false, \"emptyToNull\": true | false}   [必填: columns]  — 清理文字欄位：去頭尾空白、壓縮內部連續空白、空字串轉 NULL。 用途：使用者說「清理 / 去空白 / 格式不統一 / trim / 空字串」時。\n- FILTER: {\"field\": \"<欄位名>\", \"op\": \"=\" | \"!=\" | \">\" | \">=\" | \"<\" | \"<=\" | \"LIKE\" | \"ILIKE\" | \"IS\" | \"IS NOT\", \"val\": \"<字串>\"}   [必填: field]  — 依條件保留列，並產生 true / false 兩個輸出分支。 用途：使用者說「只要 / 過濾 / 大於 / 小於 / only / where」時。\n- FORMULA: {\"outputColumn\": \"<字串>\", \"expression\": \"<字串>\"}   [必填: outputColumn, expression]  — 用運算式新增一個欄位（DuckDB scalar expression）。 用途：需要計算新欄位（金額加成、字串拼接、條件旗標）時。\n- IMPUTE: {\"columns\": [\"<欄位名>\", ...], \"method\": \"CONSTANT\" | \"MEAN\", \"fillValue\": \"<字串>\"}   [必填: columns]  — 補上欄位中的空值（常數或該欄平均）。 用途：使用者說「補空值 / 填補缺漏 / fill null / 缺失值」時。\n- MULTI_FIELD_FORMULA: {\"columns\": [\"<欄位名>\", ...], \"expression\": \"<字串>\", \"outputMode\": \"OVERWRITE\" | \"NEW_FIELD\", \"newFieldSuffix\": \"<字串>\"}   [必填: columns, expression]  — 同一個運算式一次套用到多個欄位（用 _CurrentField_ 代表當前欄位）。 用途：使用者說「把這幾個欄位都 / 一次改多欄 / 所有欄位都套用同一個運算式 / multi-field formula」時。只改一個欄位請用 Formula。\n- MULTI_ROW_FORMULA: {\"outputColumn\": \"<字串>\", \"expression\": \"<字串>\", \"partitionBy\": [\"<欄位名>\", ...], \"orderBy\": \"<欄位名>\", \"descending\": true | false}   [必填: outputColumn, expression]  — 可跨列的運算式（視窗函數），例如取上一列的值。 用途：使用者說「上一列 / 前一筆 / 與前值比較 / LAG」時。\n- RANK: {\"target\": \"<欄位名>\", \"outputColumn\": \"<字串>\", \"method\": \"RANK\" | \"DENSE_RANK\" | \"ROW_NUMBER\", \"partitionBy\": [\"<欄位名>\", ...], \"descending\": true | false}   [必填: target]  — 排名（RANK / DENSE_RANK / ROW_NUMBER）。 用途：使用者說「排名 / 第幾名 / rank / top 排行」時。\n- REGEX: {\"field\": \"<欄位名>\", \"regexMode\": \"MATCH\" | \"PARSE\" | \"REPLACE\", \"pattern\": \"<字串>\", \"caseInsensitive\": true | false, \"outputColumn\": \"<字串>\", \"replacement\": \"<字串>\", \"outputColumns\": [\"<名稱>\", ...]}   [必填: field, pattern]  — 用正規表示式比對、擷取或取代字串（MATCH / PARSE / REPLACE 三種模式）。 用途：使用者說「正規表示式 / regex / pattern / 樣式比對 / 擷取 / 抽出 / 取代」時。單純按分隔符拆欄請用 Text to Columns。\n- RENAME: {\"renames\": [{\"from\": \"<舊欄位名>\", \"to\": \"<新欄位名>\"}]}  — 把欄位改名，保留原本位置。 用途：使用者說「改名 / 重新命名 / rename」時。\n- RUNNING_TOTAL: {\"target\": \"<欄位名>\", \"outputColumn\": \"<字串>\", \"partitionBy\": [\"<欄位名>\", ...], \"orderBy\": \"<欄位名>\"}   [必填: target]  — 累計加總（可依分區與排序）。 用途：使用者說「累計 / 累加 / running total / 到目前為止總和」時。\n- SAMPLE: {\"sampleSize\": 100, \"sampleMode\": \"FIRST\" | \"RANDOM\"}  — 取前 N 列，或隨機取樣 N 列（固定 seed，可重現）。 用途：使用者說「取前幾筆 / 抽樣 / 樣本 / top N 筆」時。\n- SELECT: {\"columns\": [\"<欄位名>\", ...]}  — 挑選要保留的欄位（空的 columns = 全選）。 用途：使用者說「只要某幾欄 / 去掉某欄 / 選欄位」時。\n- SORT: {\"field\": \"<欄位名>\", \"descending\": true | false}   [必填: field]  — 依指定欄位排序。 用途：使用者說「排序 / 由大到小 / 由小到大 / sort by」時。\n- TEXT_TO_COLUMNS: {\"field\": \"<欄位名>\", \"splitMode\": \"SEPARATOR\" | \"REGEX\", \"separator\": \"<字串>\", \"caseInsensitive\": true | false, \"outputColumns\": [\"<名稱>\", ...]}   [必填: field, outputColumns]  — 用分隔符或正規表示式把一個字串欄位拆成多個欄位。 用途：使用者說「拆欄 / 分隔 / 分割字串 / split」時。\n- UNIQUE: {\"columns\": [\"<欄位名>\", ...]}  — 依指定欄位去重，每個鍵只保留第一列。 用途：使用者說「去重 / 去除重複 / unique / distinct / 只留一筆」時。\n- CROSS_TAB: {\"pivotColumn\": \"<欄位名>\", \"valueColumn\": \"<欄位名>\", \"aggFunc\": \"SUM\" | \"AVG\" | \"COUNT\" | \"MIN\" | \"MAX\" | \"FIRST\", \"groupBy\": [\"<欄位名>\", ...]}   [必填: pivotColumn, valueColumn]  — 列轉欄（pivot）：把某欄的值展開成新欄位。 用途：使用者說「樞紐 / 列轉欄 / 展開 / pivot / 每個 X 一欄」時。\n- SUMMARIZE: {\"groupBy\": [\"<欄位名>\", ...], \"aggregations\": [{\"func\": \"SUM\" | \"AVG\" | \"COUNT\" | \"COUNT_DISTINCT\" | \"MIN\" | \"MAX\" | \"STDDEV\" | \"MEDIAN\", \"target\": \"<欄位名 或 *>\"}]}  — 依分組鍵聚合，支援多個分組鍵與多個聚合。 用途：使用者說「by X / group by X / per X / 加總 / 平均 / 合計 / 各…的總和」時。\n- TRANSPOSE: {\"columns\": [\"<欄位名>\", ...], \"nameColumn\": \"<字串>\", \"valueColumn\": \"<字串>\"}   [必填: columns]  — 欄轉列（unpivot）：把多個欄位收斂成「名稱 + 值」兩欄。 用途：使用者說「轉置 / 欄轉列 / 寬轉長 / unpivot / 多欄合併成一欄」時。\n- APPEND_FIELDS: {}  — 把第二個輸入的欄位接到每一列後面（笛卡爾積，不需鍵）。 用途：使用者說「附加欄位 / 每列都加上 / 交叉連接 / append / cross join」時。\n- FIND_REPLACE: {\"findField\": \"<欄位名>\", \"lookupField\": \"<欄位名>\", \"replaceField\": \"<欄位名>\", \"outputColumn\": \"<字串>\", \"unmatched\": \"KEEP\" | \"NULL\"}   [必填: findField, lookupField, replaceField]  — 用查找表把某欄的值替換掉，只帶回一個值欄位（不像 Join 帶回全部欄位）。 用途：使用者說「查找替換 / 對照表換值 / 代碼換名稱 / lookup / mapping」時。\n- FUZZY_JOIN: {\"leftKey\": \"<欄位名>\", \"rightKey\": \"<欄位名>\", \"matchFunc\": \"JARO_WINKLER\" | \"LEVENSHTEIN\" | \"DAMERAU_LEVENSHTEIN\" | \"EXACT\", \"threshold\": 0.85, \"joinType\": \"INNER\" | \"LEFT\", \"prefilter\": \"NONE\" | \"FIRST_CHAR\", \"scoreColumn\": \"<字串>\", \"caseInsensitive\": true | false}   [必填: leftKey, rightKey]  — 用字串相似度（而非完全相等）合併兩個輸入，可選擇輸出相似度分數。 用途：使用者說「模糊比對 / 相似度合併 / 拼錯也對得上 / fuzzy match / 姓名或地址對照」時。鍵完全相等時請用 Join —— 這個節點會做兩兩比較，代價高得多。\n- JOIN: {\"joinType\": \"INNER\" | \"LEFT\" | \"RIGHT\" | \"FULL\" | \"CROSS\", \"leftKey\": \"<欄位名>\", \"rightKey\": \"<欄位名>\"}  — 依鍵合併兩個輸入，保留兩邊全部欄位。 用途：使用者說「合併 / 連接 / 對照 / join / 關聯兩張表」時。\n- SPATIAL_MATCH: {\"leftGeometryField\": \"<欄位名>\", \"leftLonField\": \"<欄位名>\", \"leftLatField\": \"<欄位名>\", \"rightGeometryField\": \"<欄位名>\", \"rightLonField\": \"<欄位名>\", \"rightLatField\": \"<欄位名>\", \"spatialPredicate\": \"INTERSECTS\" | \"CONTAINS\" | \"WITHIN\" | \"TOUCHES\" | \"OVERLAPS\" | \"CROSSES\" | \"EQUALS\" | \"DWITHIN\", \"distance\": 0.01, \"distanceUnit\": \"DEGREES\" | \"METERS\", \"distanceColumn\": \"<字串>\", \"joinType\": \"INNER\" | \"LEFT\"}  — 用空間關係（相交 / 包含 / 距離）合併兩個輸入。幾何可來自 WKT 欄位或經緯度兩欄。 用途：使用者說「空間比對 / 這個點落在哪個區 / 方圓幾公尺內 / 地理圍欄 / 門店與行政區對照 / spatial join」時。只是要比對文字請用 Fuzzy Join；兩邊的鍵完全相等請用 Join。\n- UNION: {\"unionMode\": \"BY_NAME\" | \"POSITION\"}  — 把 N 個輸入上下疊起來（預設依欄位名對齊）。 用途：使用者說「合併多張表 / 疊起來 / union / 串接 / 同一種資料合在一起」時。\n- VIZ_CHART: {\"chartType\": \"BAR\" | \"LINE\" | \"PIE\" | \"KPI\", \"xAxis\": \"<欄位名>\", \"yAxis\": \"<欄位名>\"}  — 把上游結果畫成圖表（不產生輸出表）。 用途：使用者說「畫圖 / 圖表 / 視覺化 / chart / 趨勢圖」時，放在 pipeline 末端。",
+  "promptSection": "- INPUT_DUCKDB: {\"tableName\": \"<字串>\", \"fileName\": \"<字串>\"}  — 從 DuckDB 資料表或上傳的 CSV / Parquet 檔載入資料。 用途：每個 pipeline 的起點。使用者在畫布上已有資料時，改連現有節點即可，不要另開一個 Input。\n- OUTPUT: {\"fileName\": \"<字串>\", \"outputFormat\": \"CSV\" | \"JSON\"}  — 標記工作流的輸出，並可把結果下載成 CSV / JSON 檔。 用途：使用者說「輸出 / 下載 / 匯出成檔案 / 存成 CSV / output / export / 給我一份檔案」時。它不改資料，只是把上游結果標成明確的終點。\n- ASSERT: {\"assertCheck\": \"NOT_NULL\" | \"UNIQUE\" | \"ROW_COUNT\" | \"PREDICATE\", \"assertColumn\": \"<字串>\", \"assertMin\": \"<字串>\", \"assertMax\": \"<字串>\", \"assertPredicate\": \"<字串>\", \"assertLabel\": \"<字串>\"}  — 資料品質閘門：條件不成立就讓節點失敗，並擋掉所有下游。 用途：使用者說「確保 / 檢查 / 驗證 / 不得為空 / 必須唯一 / 不要有重複 / 列數要在某個範圍 / 資料品質 / assert / validate」時。它不改資料，只是在上游結果上守一條規則。\n- DATA_CLEANSING: {\"columns\": [\"<欄位名>\", ...], \"trim\": true | false, \"collapse\": true | false, \"emptyToNull\": true | false}   [必填: columns]  — 清理文字欄位：去頭尾空白、壓縮內部連續空白、空字串轉 NULL。 用途：使用者說「清理 / 去空白 / 格式不統一 / trim / 空字串」時。\n- FILTER: {\"field\": \"<欄位名>\", \"op\": \"=\" | \"!=\" | \">\" | \">=\" | \"<\" | \"<=\" | \"LIKE\" | \"ILIKE\" | \"IS\" | \"IS NOT\", \"val\": \"<字串>\"}   [必填: field]  — 依條件保留列，並產生 true / false 兩個輸出分支。 用途：使用者說「只要 / 過濾 / 大於 / 小於 / only / where」時。\n- FORMULA: {\"outputColumn\": \"<字串>\", \"expression\": \"<字串>\"}   [必填: outputColumn, expression]  — 用運算式新增一個欄位（DuckDB scalar expression）。 用途：需要計算新欄位（金額加成、字串拼接、條件旗標）時。\n- IMPUTE: {\"columns\": [\"<欄位名>\", ...], \"method\": \"CONSTANT\" | \"MEAN\", \"fillValue\": \"<字串>\"}   [必填: columns]  — 補上欄位中的空值（常數或該欄平均）。 用途：使用者說「補空值 / 填補缺漏 / fill null / 缺失值」時。\n- MULTI_FIELD_FORMULA: {\"columns\": [\"<欄位名>\", ...], \"expression\": \"<字串>\", \"outputMode\": \"OVERWRITE\" | \"NEW_FIELD\", \"newFieldSuffix\": \"<字串>\"}   [必填: columns, expression]  — 同一個運算式一次套用到多個欄位（用 _CurrentField_ 代表當前欄位）。 用途：使用者說「把這幾個欄位都 / 一次改多欄 / 所有欄位都套用同一個運算式 / multi-field formula」時。只改一個欄位請用 Formula。\n- MULTI_ROW_FORMULA: {\"outputColumn\": \"<字串>\", \"expression\": \"<字串>\", \"partitionBy\": [\"<欄位名>\", ...], \"orderBy\": \"<欄位名>\", \"descending\": true | false}   [必填: outputColumn, expression]  — 可跨列的運算式（視窗函數），例如取上一列的值。 用途：使用者說「上一列 / 前一筆 / 與前值比較 / LAG」時。\n- RANK: {\"target\": \"<欄位名>\", \"outputColumn\": \"<字串>\", \"method\": \"RANK\" | \"DENSE_RANK\" | \"ROW_NUMBER\", \"partitionBy\": [\"<欄位名>\", ...], \"descending\": true | false}   [必填: target]  — 排名（RANK / DENSE_RANK / ROW_NUMBER）。 用途：使用者說「排名 / 第幾名 / rank / top 排行」時。\n- REGEX: {\"field\": \"<欄位名>\", \"regexMode\": \"MATCH\" | \"PARSE\" | \"REPLACE\", \"pattern\": \"<字串>\", \"caseInsensitive\": true | false, \"outputColumn\": \"<字串>\", \"replacement\": \"<字串>\", \"outputColumns\": [\"<名稱>\", ...]}   [必填: field, pattern]  — 用正規表示式比對、擷取或取代字串（MATCH / PARSE / REPLACE 三種模式）。 用途：使用者說「正規表示式 / regex / pattern / 樣式比對 / 擷取 / 抽出 / 取代」時。單純按分隔符拆欄請用 Text to Columns。\n- RENAME: {\"renames\": [{\"from\": \"<舊欄位名>\", \"to\": \"<新欄位名>\"}]}  — 把欄位改名，保留原本位置。 用途：使用者說「改名 / 重新命名 / rename」時。\n- RUNNING_TOTAL: {\"target\": \"<欄位名>\", \"outputColumn\": \"<字串>\", \"partitionBy\": [\"<欄位名>\", ...], \"orderBy\": \"<欄位名>\"}   [必填: target]  — 累計加總（可依分區與排序）。 用途：使用者說「累計 / 累加 / running total / 到目前為止總和」時。\n- SAMPLE: {\"sampleSize\": 100, \"sampleMode\": \"FIRST\" | \"RANDOM\"}  — 取前 N 列，或隨機取樣 N 列（固定 seed，可重現）。 用途：使用者說「取前幾筆 / 抽樣 / 樣本 / top N 筆」時。\n- SELECT: {\"columns\": [\"<欄位名>\", ...]}  — 挑選要保留的欄位（空的 columns = 全選）。 用途：使用者說「只要某幾欄 / 去掉某欄 / 選欄位」時。\n- SORT: {\"field\": \"<欄位名>\", \"descending\": true | false}   [必填: field]  — 依指定欄位排序。 用途：使用者說「排序 / 由大到小 / 由小到大 / sort by」時。\n- TEXT_TO_COLUMNS: {\"field\": \"<欄位名>\", \"splitMode\": \"SEPARATOR\" | \"REGEX\", \"separator\": \"<字串>\", \"caseInsensitive\": true | false, \"outputColumns\": [\"<名稱>\", ...]}   [必填: field, outputColumns]  — 用分隔符或正規表示式把一個字串欄位拆成多個欄位。 用途：使用者說「拆欄 / 分隔 / 分割字串 / split」時。\n- UNIQUE: {\"columns\": [\"<欄位名>\", ...]}  — 依指定欄位去重，每個鍵只保留第一列。 用途：使用者說「去重 / 去除重複 / unique / distinct / 只留一筆」時。\n- CROSS_TAB: {\"pivotColumn\": \"<欄位名>\", \"valueColumn\": \"<欄位名>\", \"aggFunc\": \"SUM\" | \"AVG\" | \"COUNT\" | \"MIN\" | \"MAX\" | \"FIRST\", \"groupBy\": [\"<欄位名>\", ...]}   [必填: pivotColumn, valueColumn]  — 列轉欄（pivot）：把某欄的值展開成新欄位。 用途：使用者說「樞紐 / 列轉欄 / 展開 / pivot / 每個 X 一欄」時。\n- SUMMARIZE: {\"groupBy\": [\"<欄位名>\", ...], \"aggregations\": [{\"func\": \"SUM\" | \"AVG\" | \"COUNT\" | \"COUNT_DISTINCT\" | \"MIN\" | \"MAX\" | \"STDDEV\" | \"MEDIAN\", \"target\": \"<欄位名 或 *>\"}]}  — 依分組鍵聚合，支援多個分組鍵與多個聚合。 用途：使用者說「by X / group by X / per X / 加總 / 平均 / 合計 / 各…的總和」時。\n- TRANSPOSE: {\"columns\": [\"<欄位名>\", ...], \"nameColumn\": \"<字串>\", \"valueColumn\": \"<字串>\"}   [必填: columns]  — 欄轉列（unpivot）：把多個欄位收斂成「名稱 + 值」兩欄。 用途：使用者說「轉置 / 欄轉列 / 寬轉長 / unpivot / 多欄合併成一欄」時。\n- APPEND_FIELDS: {}  — 把第二個輸入的欄位接到每一列後面（笛卡爾積，不需鍵）。 用途：使用者說「附加欄位 / 每列都加上 / 交叉連接 / append / cross join」時。\n- FIND_REPLACE: {\"findField\": \"<欄位名>\", \"lookupField\": \"<欄位名>\", \"replaceField\": \"<欄位名>\", \"outputColumn\": \"<字串>\", \"unmatched\": \"KEEP\" | \"NULL\"}   [必填: findField, lookupField, replaceField]  — 用查找表把某欄的值替換掉，只帶回一個值欄位（不像 Join 帶回全部欄位）。 用途：使用者說「查找替換 / 對照表換值 / 代碼換名稱 / lookup / mapping」時。\n- FUZZY_JOIN: {\"leftKey\": \"<欄位名>\", \"rightKey\": \"<欄位名>\", \"matchFunc\": \"JARO_WINKLER\" | \"LEVENSHTEIN\" | \"DAMERAU_LEVENSHTEIN\" | \"EXACT\", \"threshold\": 0.85, \"joinType\": \"INNER\" | \"LEFT\", \"prefilter\": \"NONE\" | \"FIRST_CHAR\", \"scoreColumn\": \"<字串>\", \"caseInsensitive\": true | false}   [必填: leftKey, rightKey]  — 用字串相似度（而非完全相等）合併兩個輸入，可選擇輸出相似度分數。 用途：使用者說「模糊比對 / 相似度合併 / 拼錯也對得上 / fuzzy match / 姓名或地址對照」時。鍵完全相等時請用 Join —— 這個節點會做兩兩比較，代價高得多。\n- JOIN: {\"joinType\": \"INNER\" | \"LEFT\" | \"RIGHT\" | \"FULL\" | \"CROSS\", \"leftKey\": \"<欄位名>\", \"rightKey\": \"<欄位名>\"}  — 依鍵合併兩個輸入，保留兩邊全部欄位。 用途：使用者說「合併 / 連接 / 對照 / join / 關聯兩張表」時。\n- SPATIAL_MATCH: {\"leftGeometryField\": \"<欄位名>\", \"leftLonField\": \"<欄位名>\", \"leftLatField\": \"<欄位名>\", \"rightGeometryField\": \"<欄位名>\", \"rightLonField\": \"<欄位名>\", \"rightLatField\": \"<欄位名>\", \"spatialPredicate\": \"INTERSECTS\" | \"CONTAINS\" | \"WITHIN\" | \"TOUCHES\" | \"OVERLAPS\" | \"CROSSES\" | \"EQUALS\" | \"DWITHIN\", \"distance\": 0.01, \"distanceUnit\": \"DEGREES\" | \"METERS\", \"distanceColumn\": \"<字串>\", \"joinType\": \"INNER\" | \"LEFT\"}  — 用空間關係（相交 / 包含 / 距離）合併兩個輸入。幾何可來自 WKT 欄位或經緯度兩欄。 用途：使用者說「空間比對 / 這個點落在哪個區 / 方圓幾公尺內 / 地理圍欄 / 門店與行政區對照 / spatial join」時。只是要比對文字請用 Fuzzy Join；兩邊的鍵完全相等請用 Join。\n- UNION: {\"unionMode\": \"BY_NAME\" | \"POSITION\"}  — 把 N 個輸入上下疊起來（預設依欄位名對齊）。 用途：使用者說「合併多張表 / 疊起來 / union / 串接 / 同一種資料合在一起」時。\n- VIZ_CHART: {\"chartType\": \"BAR\" | \"LINE\" | \"PIE\" | \"KPI\", \"xAxis\": \"<欄位名>\", \"yAxis\": \"<欄位名>\"}  — 把上游結果畫成圖表（不產生輸出表）。 用途：使用者說「畫圖 / 圖表 / 視覺化 / chart / 趨勢圖」時，放在 pipeline 末端。",
   "nodes": [
     {
       "type": "INPUT_DUCKDB",
@@ -137,6 +144,70 @@
           ],
           "default": "CSV",
           "hint": "CSV 適合試算表；JSON 適合再進程式處理。匯出的 Polars 腳本會真的寫出這個檔案。"
+        }
+      ]
+    },
+    {
+      "type": "ASSERT",
+      "label": "Assert",
+      "category": "Preparation",
+      "description": "資料品質閘門：條件不成立就讓節點失敗，並擋掉所有下游。",
+      "whenToUse": "使用者說「確保 / 檢查 / 驗證 / 不得為空 / 必須唯一 / 不要有重複 / 列數要在某個範圍 / 資料品質 / assert / validate」時。它不改資料，只是在上游結果上守一條規則。",
+      "inputs": 1,
+      "fields": [
+        {
+          "name": "assertCheck",
+          "kind": "enum",
+          "label": "檢查",
+          "required": false,
+          "values": [
+            "NOT_NULL",
+            "UNIQUE",
+            "ROW_COUNT",
+            "PREDICATE"
+          ],
+          "default": "NOT_NULL",
+          "hint": "條件不成立時這個節點會失敗，並擋掉所有下游節點。"
+        },
+        {
+          "name": "assertColumn",
+          "kind": "text",
+          "label": "欄位",
+          "required": false,
+          "default": "id",
+          "hint": "NOT_NULL / UNIQUE 用。UNIQUE 可用逗號分隔做組合鍵（例如 a, b）。"
+        },
+        {
+          "name": "assertMin",
+          "kind": "text",
+          "label": "列數下限",
+          "required": false,
+          "default": "",
+          "hint": "ROW_COUNT 用。留空 = 不設限（不是 0）。"
+        },
+        {
+          "name": "assertMax",
+          "kind": "text",
+          "label": "列數上限",
+          "required": false,
+          "default": "",
+          "hint": "ROW_COUNT 用。留空 = 不設限。"
+        },
+        {
+          "name": "assertPredicate",
+          "kind": "text",
+          "label": "述句",
+          "required": false,
+          "default": "amount >= 0",
+          "hint": "PREDICATE 用。不得有任何一列讓它為假。"
+        },
+        {
+          "name": "assertLabel",
+          "kind": "text",
+          "label": "檢查名稱",
+          "required": false,
+          "default": "",
+          "hint": "只給人看，會出現在失敗訊息裡。留空則用檢查種類當名稱。"
         }
       ]
     },

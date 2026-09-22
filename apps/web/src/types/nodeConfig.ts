@@ -159,6 +159,20 @@ export const NODE_CONFIG_SHAPE = {
 	/** 輸出格式：CSV | JSON。Polars 匯出會真的寫檔；DuckDB 由 UI 的下載鈕產生 */
 	outputFormat: "string",
 
+	// --- ASSERT -----------------------------------------------------------
+	/** 檢查種類：NOT_NULL（預設）| UNIQUE | ROW_COUNT | PREDICATE */
+	assertCheck: "string",
+	/** NOT_NULL / UNIQUE 要檢查的欄位；UNIQUE 可用逗號分隔做組合鍵 */
+	assertColumn: "string",
+	/** ROW_COUNT 的下限；空 = 不設限（**不是** 0，見 safeAssertBound） */
+	assertMin: "string",
+	/** ROW_COUNT 的上限；空 = 不設限 */
+	assertMax: "string",
+	/** PREDICATE 的述句：**不得**有任何一列讓它為假 */
+	assertPredicate: "string",
+	/** 只給人看的檢查名稱，會出現在失敗訊息裡（英數字 / 底線 / 連字號） */
+	assertLabel: "string",
+
 	// --- SELECT / UNION / SAMPLE -----------------------------------------
 	/** SELECT 要投影的欄位；空陣列 = 全選 */
 	columns: "string[]",
