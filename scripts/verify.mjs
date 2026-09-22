@@ -315,6 +315,113 @@ check("OUTPUT needs no DuckDB extension", sqlMod.requiredExtensions("OUTPUT"), [
 check("SPATIAL_MATCH is still the only node needing an extension",
 	sqlMod.requiredExtensions("SPATIAL_MATCH"), ["spatial"]);
 
+// --- ASSERT：資料品質閘門 ---------------------------------------------------
+// 機制是**實測**出來的，不是假設。DuckDB 的 error() 不會被常數折疊，所以放在
+// 外層 WHERE 之後就只有真的違反時才觸發（0 列命中時完全不呼叫 error）。
+// 兩個被淘汰的替代方案也釘在這裡，免得有人走回去：
+//   - `1 / 0` 回 Infinity，**不會**拋錯
+//   - `ALTER TABLE ... ADD CONSTRAINT` 在這個 build 未實作
+{
+	const stmts = (cfg) =>
+		sqlMod.compileNodeStatements("node_a", "ASSERT", cfg, ["node_u"]);
+
+	check("ASSERT is a passthrough — a check must never silently drop rows",
+		sqlMod.compileNodeSelect("node_a", "ASSERT", {}, ["node_u"]),
+		'SELECT * FROM "node_u"');
+	check("ASSERT still creates its own output table",
+		stmts({})[0],
+		'CREATE OR REPLACE TEMP TABLE "node_a" AS SELECT * FROM "node_u";');
+	check("ASSERT emits the table plus exactly one guard", stmts({}).length, 2);
+	check("...and the guard runs AFTER the table is built, so the bad rows survive for inspection",
+		stmts({})[1].startsWith("SELECT error("), true);
+	check("...and the guard never leaks into the CTE body",
+		sqlMod.compileNodeSelect("node_a", "ASSERT", {}, ["node_u"]).includes("error"), false);
+	check("...and the guard carries no DDL",
+		stmts({})[1].includes("CREATE"), false);
+
+	// NOT_NULL
+	check("NOT_NULL guards on IS NULL",
+		stmts({ assertCheck: "NOT_NULL", assertColumn: "customer" })[1],
+		`SELECT error('ASSERT NOT_NULL: ' || CAST(n AS VARCHAR) || ' 列「customer」為 NULL') FROM (SELECT COUNT(*) AS n FROM "node_a" WHERE "customer" IS NULL) WHERE n > 0;`);
+	check("NOT_NULL defaults to id",
+		stmts({ assertCheck: "NOT_NULL" })[1].includes('WHERE "id" IS NULL'), true);
+
+	// UNIQUE
+	check("UNIQUE groups and counts duplicate keys",
+		stmts({ assertCheck: "UNIQUE", assertColumn: "id" })[1],
+		`SELECT error('ASSERT UNIQUE: ' || CAST(n AS VARCHAR) || ' 組組合鍵「id」重複') FROM (SELECT COUNT(*) AS n FROM (SELECT 1 FROM "node_a" GROUP BY "id" HAVING COUNT(*) > 1)) WHERE n > 0;`);
+	check("UNIQUE quotes each column of a composite key separately",
+		stmts({ assertCheck: "UNIQUE", assertColumn: "id, year" })[1].includes('GROUP BY "id", "year"'), true);
+	check("...and names the composite key in the message",
+		stmts({ assertCheck: "UNIQUE", assertColumn: "id, year" })[1].includes("組組合鍵「id + year」重複"), true);
+
+	// ROW_COUNT
+	// ROW_COUNT 的訊息把數字夾在「列數」與「不在…之內」中間，所以它的前綴
+	// 比其他三個多一段（否則會讀成「4 列數不在」）。
+	check("ROW_COUNT checks both bounds",
+		stmts({ assertCheck: "ROW_COUNT", assertMin: "1", assertMax: "10" })[1],
+		`SELECT error('ASSERT ROW_COUNT: 列數 ' || CAST(n AS VARCHAR) || ' 不在 1..10 之內') FROM (SELECT COUNT(*) AS n FROM "node_a") WHERE n < 1 OR n > 10;`);
+	check("ROW_COUNT with only a lower bound checks one side",
+		stmts({ assertCheck: "ROW_COUNT", assertMin: "5" })[1].endsWith("WHERE n < 5;"), true);
+	check("ROW_COUNT with only an upper bound checks one side",
+		stmts({ assertCheck: "ROW_COUNT", assertMax: "5" })[1].endsWith("WHERE n > 5;"), true);
+	check("ROW_COUNT with no bounds emits NO guard at all, rather than a statement that always passes",
+		stmts({ assertCheck: "ROW_COUNT" }).length, 1);
+	// intLit 會 Math.floor 並把負數夾成 0（它原本是給 LIMIT/OFFSET 用的）→ 邊界不能走它
+	check("ROW_COUNT keeps a negative bound instead of clamping it to 0",
+		stmts({ assertCheck: "ROW_COUNT", assertMin: "-5" })[1].includes("n < -5"), true);
+	check("ROW_COUNT treats a non-numeric bound as unset",
+		stmts({ assertCheck: "ROW_COUNT", assertMin: "abc", assertMax: "" }).length, 1);
+	check("ROW_COUNT treats a blank bound as unset, not as 0",
+		stmts({ assertCheck: "ROW_COUNT", assertMin: "  ", assertMax: "0" })[1].endsWith("WHERE n > 0;"), true);
+
+	// PREDICATE
+	check("PREDICATE negates through COALESCE, so a NULL predicate counts as a violation",
+		stmts({ assertCheck: "PREDICATE", assertPredicate: "amount >= 0" })[1].includes("NOT COALESCE((amount >= 0), FALSE)"), true);
+	check("PREDICATE does not use a naive NOT",
+		stmts({ assertCheck: "PREDICATE", assertPredicate: "amount >= 0" })[1].includes("WHERE NOT (amount"), false);
+	check("PREDICATE refuses a multi-statement expression and falls back to TRUE",
+		stmts({ assertCheck: "PREDICATE", assertPredicate: "1=1; DROP TABLE x" })[1].includes("NOT COALESCE((TRUE), FALSE)"), true);
+
+	// 注入面：訊息會變成 error() 的參數，所以每一段字面值都要各自 escape
+	check("a hostile assertLabel cannot close the SQL string literal",
+		sqlMod.compileNodeStatements("node_a", "ASSERT",
+			{ assertCheck: "UNIQUE", assertColumn: "id", assertLabel: "x'); DROP TABLE t; --" }, ["node_u"])[1]
+			.includes("''"), false);
+	check("a column name containing a quote is escaped in the message",
+		stmts({ assertCheck: "UNIQUE", assertColumn: "a'b" })[1].includes("a''b"), true);
+	check("...and is still quoted correctly as an identifier",
+		stmts({ assertCheck: "UNIQUE", assertColumn: "a'b" })[1].includes('GROUP BY "a\'b"'), true);
+	// 兩個上下文要分清楚：訊息是**單引號字串字面值**（' 要加倍），
+	// 識別字是**雙引號**（' 不用動，要加倍的是 "）。搞混就會產生語法錯誤。
+	check("a column name containing a double quote doubles it in the identifier",
+		stmts({ assertCheck: "UNIQUE", assertColumn: 'a"b' })[1].includes('GROUP BY "a""b"'), true);
+
+	check("an unknown check falls back to NOT_NULL",
+		stmts({ assertCheck: "WAT", assertColumn: "id" })[1].includes("ASSERT NOT_NULL"), true);
+
+	// 純函式層：白名單與清理
+	const sqlHelpers = await loadTs("apps/web/src/engine/sql.ts");
+	check("safeAssertCheck normalises case and spaces",
+		sqlHelpers.safeAssertCheck("not null"), "NOT_NULL");
+	check("safeAssertCheck falls back on an unknown value",
+		sqlHelpers.safeAssertCheck("WAT", "UNIQUE"), "UNIQUE");
+	check("safeAssertBound returns null for a blank string",
+		sqlHelpers.safeAssertBound("   "), null);
+	check("safeAssertBound returns null for a non-number",
+		sqlHelpers.safeAssertBound("abc"), null);
+	check("safeAssertBound keeps 0 (it is a real bound)",
+		sqlHelpers.safeAssertBound("0"), 0);
+	check("safeAssertBound keeps a negative number",
+		sqlHelpers.safeAssertBound("-5"), -5);
+	check("safeAssertLabel strips quotes, semicolons and parens",
+		sqlHelpers.safeAssertLabel("x'); DROP TABLE t; --"), "x DROP TABLE t --");
+	check("safeAssertLabel returns the fallback for an all-stripped value",
+		sqlHelpers.safeAssertLabel("'''", "NOT_NULL"), "NOT_NULL");
+	check("safeAssertLabel caps the length",
+		sqlHelpers.safeAssertLabel("a".repeat(200)).length, 60);
+}
+
 // ===========================================================================
 // 2b. csv.ts — OUTPUT 下載的序列化
 // ===========================================================================
@@ -981,13 +1088,34 @@ section("8. exportPolars.ts — Python / Polars 腳本匯出");
 		'pl.col("a")  +  pl.col("b")');
 	check("COALESCE chains fill_null", T("COALESCE(a, b, c)"),
 		'pl.col("a").fill_null(pl.col("b")).fill_null(pl.col("c"))');
+	// 比較運算子：SQL 的寫法要換成 Python 的寫法（`=` 是賦值、`<>` 是標準不等於）
+	check("a SQL equality becomes Python ==", T("amount = 1000"), 'pl.col("amount") == 1000');
+	check("a SQL <> becomes Python !=", T("amount <> 1000"), 'pl.col("amount") != 1000');
+	// 兩字元的運算子不能被拆成兩個 token，否則會產生 `> = 0`（Python 語法錯誤）
+	check(">= is tokenised as one operator", T("amount >= 1000"), 'pl.col("amount") >= 1000');
+	check("<= is tokenised as one operator", T("amount <= 1000"), 'pl.col("amount") <= 1000');
+	check("!= passes through unchanged", T("amount != 1000"), 'pl.col("amount") != 1000');
+	check("a comparison between two columns works", T("a > b"), 'pl.col("a") > pl.col("b")');
+	check("a comparison still nests inside a function call", T("ABS(a - b) > 1"),
+		'(pl.col("a") - pl.col("b")).abs() > 1');
+
 	// 拒絕清單：這些硬翻一定錯（運算子優先級 / 沒有對應 API）
-	check("AND is refused (Polars needs explicit parentheses)", T("a > 1 AND b < 2"), null);
+	//
+	// AND / OR / NOT 留在拒絕清單是**刻意的**，而且理由不是「沒有對應 API」——
+	// 它們有（`&` `|` `~`）。真正的理由是 Python 的位元運算子優先級與 SQL 的
+	// 關鍵字相反：`&` 比比較運算子**綁得更緊**，所以 `a > 1 AND b < 2` 若天真地
+	// 譯成 `a > 1 & b < 2`，Python 會讀成 `a > (1 & b) < 2` —— 一個**連鎖比較**，
+	// 不拋錯、結果卻是垃圾。要正確處理就得寫帶優先級的剖析器，而不是現在這個
+	// 平坦的產生器。所以維持拒絕，並改用「一個 ASSERT 一個條件」表達複合條件。
+	check("AND is refused (Python's & binds tighter than a comparison)", T("a > 1 AND b < 2"), null);
+	check("OR is refused for the same reason", T("a > 1 OR b < 2"), null);
+	check("NOT is refused (Python's ~ binds tighter still)", T("NOT a > 1"), null);
 	check("CASE is refused", T("CASE WHEN a > 1 THEN 1 ELSE 0 END"), null);
 	check("CAST is refused", T("CAST(amount AS DOUBLE)"), null);
 	check("unknown function is refused", T("SOME_UNKNOWN_FN(amount)"), null);
 	check("unterminated string is refused", T("'abc"), null);
 	check("unknown character is refused", T("amount || 'x'"), null);
+	check("a bare ! is refused (only != is an operator)", T("!amount"), null);
 	check("empty expression is refused", T(""), null);
 
 	// --- 型別 / 字面值 ---
@@ -1411,6 +1539,48 @@ section("8. exportPolars.ts — Python / Polars 腳本匯出");
 		one("OUTPUT", { fileName: "a.csv" }), "畫布上的下載鈕");
 	has("...the emitted line names the file for the reader",
 		one("OUTPUT", { fileName: "sales.csv" }), "匯出 → sales.csv");
+
+	// --- ASSERT：Polars 端反而比 SQL 端乾淨（Python 有真正的 raise）---
+	// 兩邊的**語意**必須一致，只有語法不同。所以訊息格式刻意一字不差，
+	// 而且列數必須對得上 —— 後者由 wasm 那節的實測負責（兩邊都抓到 2 列）。
+	has("ASSERT passes the frame through unchanged",
+		one("ASSERT", { assertCheck: "NOT_NULL", assertColumn: "id" }), "node_x = raw_data");
+	has("ASSERT NOT_NULL counts nulls and raises",
+		one("ASSERT", { assertCheck: "NOT_NULL", assertColumn: "customer" }),
+		'raise ValueError(f"ASSERT NOT_NULL: {_as_node_x} 列「customer」為 NULL")');
+	has("ASSERT UNIQUE groups on the key and raises",
+		one("ASSERT", { assertCheck: "UNIQUE", assertColumn: "id" }),
+		'group_by(["id"]).agg(pl.len().alias("__n")).filter(pl.col("__n") > 1).height');
+	has("ASSERT UNIQUE splits a composite key into separate columns",
+		one("ASSERT", { assertCheck: "UNIQUE", assertColumn: "id, year" }),
+		'group_by(["id", "year"])');
+	has("ASSERT ROW_COUNT chains both bounds",
+		one("ASSERT", { assertCheck: "ROW_COUNT", assertMin: "1", assertMax: "10" }),
+		"if not (1 <= _as_node_x <= 10):");
+	has("ASSERT ROW_COUNT with only an upper bound emits just that side",
+		one("ASSERT", { assertCheck: "ROW_COUNT", assertMax: "10" }), "if not (_as_node_x <= 10):");
+	check("ASSERT ROW_COUNT never compares against None",
+		one("ASSERT", { assertCheck: "ROW_COUNT", assertMax: "10" }).includes("None"), false);
+	check("ASSERT ROW_COUNT with no bounds emits no check at all",
+		one("ASSERT", { assertCheck: "ROW_COUNT" }).includes("raise"), false);
+	has("...but says so in a note", one("ASSERT", { assertCheck: "ROW_COUNT" }), "不會檢查任何東西");
+	// 這條是關鍵：`~None` 在 Polars 仍是 None，而 filter(None) 會把那一列丟掉，
+	// 於是「述句為 NULL」的列會溜過檢查 —— 與 SQL 端的 NOT COALESCE 不一致。
+	has("ASSERT PREDICATE counts a null predicate as a violation (parity with SQL)",
+		one("ASSERT", { assertCheck: "PREDICATE", assertPredicate: "amount >= 0" }),
+		'(~(pl.col("amount") >= 0)).fill_null(True)');
+	// 翻譯不了就要**大聲拒絕**，不能安靜地不檢查 ——
+	// 一個永遠通過的斷言比沒有斷言更危險。
+	const asBad = oneRes("ASSERT", { assertCheck: "PREDICATE", assertPredicate: "amount > 0 AND id > 0" });
+	check("an untranslatable ASSERT predicate is reported for review", asBad.needsReview, ["node_x"]);
+	has("...leaves a TODO", asBad.script, "# TODO: ASSERT 述句無法自動翻譯");
+	check("...and does not pretend the check ran",
+		asBad.script.includes("raise ValueError"), false);
+	// 訊息裡會嵌欄位名，而欄位名是使用者可控的 —— 內層雙引號會提早結束 f-string
+	check("ASSERT never leaves a double quote inside an f-string message",
+		one("ASSERT", { assertCheck: "NOT_NULL", assertColumn: 'a"b' }).includes('「a"b」'), false);
+	has("...it swaps it for a single quote instead",
+		one("ASSERT", { assertCheck: "NOT_NULL", assertColumn: 'a"b' }), "「a'b」");
 
 	// --- 產生的腳本必須是合法的 Python（用 CPython 真的編譯一次）---
 	// 字串比對只能證明「看起來像 Python」。這裡真的交給 CPython 檢查語法。

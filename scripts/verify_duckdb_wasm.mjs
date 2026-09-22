@@ -1234,6 +1234,110 @@ export async function runDuckDbWasmChecks(root, loadTs, fallbackPipelines = []) 
 		cleanOk, "ok");
 
 	// =====================================================================
+	// 11i. ASSERT：資料品質閘門
+	// =====================================================================
+	// 這一節是整個 ASSERT 設計的根據 —— 機制在**這個 build 上實測**出來的：
+	//   - error() 存在，而且**不會被常數折疊**：放在外層 WHERE 之後時，
+	//     0 列命中就完全不呼叫它。這正是「只有真的違反才觸發」的原因。
+	//   - `1 / 0` 回 Infinity，**不會**拋錯（所以它不能當守門）→ 淘汰
+	//   - `ALTER TABLE ... ADD CONSTRAINT` 在這個 build 未實作 → 淘汰
+	conn.query(
+		`CREATE OR REPLACE TABLE as_good AS SELECT * FROM (VALUES
+			(1, 'a', 10), (2, 'b', 20), (3, 'c', 30), (4, 'd', 40)
+		) AS t(id, customer, amount);`,
+	);
+	conn.query(
+		`CREATE OR REPLACE TABLE as_bad AS SELECT * FROM (VALUES
+			(1, 'a', 10), (1, 'b', -5), (NULL, NULL, 30), (4, 'd', NULL), (5, 'e', 50)
+		) AS t(id, customer, amount);`,
+	);
+
+	/** 跑一個 ASSERT 節點真正產生的語句，回傳 "ok" 或第一行錯誤訊息 */
+	const runAssert = (table, cfg) => {
+		try {
+			conn.query(
+				compiler.generateSqlFromConfig("as_node", "ASSERT", cfg, [table], {
+					falseBranch: false,
+				}),
+			);
+			return "ok";
+		} catch (err) {
+			return String(err.message).split("\n")[0].trim().slice(0, 110);
+		}
+	};
+
+	// NOT_NULL
+	add("ASSERT NOT_NULL passes on clean data",
+		runAssert("as_good", { assertCheck: "NOT_NULL", assertColumn: "customer" }), "ok");
+	add("ASSERT NOT_NULL fails on a null, naming the column and the count",
+		runAssert("as_bad", { assertCheck: "NOT_NULL", assertColumn: "customer" }),
+		"Invalid Input Error: ASSERT NOT_NULL: 1 列「customer」為 NULL");
+
+	// UNIQUE
+	add("ASSERT UNIQUE passes on clean data",
+		runAssert("as_good", { assertCheck: "UNIQUE", assertColumn: "id" }), "ok");
+	add("ASSERT UNIQUE fails on a duplicate key",
+		runAssert("as_bad", { assertCheck: "UNIQUE", assertColumn: "id" }),
+		"Invalid Input Error: ASSERT UNIQUE: 1 組組合鍵「id」重複");
+	add("ASSERT UNIQUE accepts a composite key that IS unique",
+		runAssert("as_bad", { assertCheck: "UNIQUE", assertColumn: "id, amount" }), "ok");
+
+	// ROW_COUNT
+	add("ASSERT ROW_COUNT passes inside the range",
+		runAssert("as_good", { assertCheck: "ROW_COUNT", assertMin: "1", assertMax: "10" }), "ok");
+	add("ASSERT ROW_COUNT fails below the lower bound, reporting the actual count",
+		runAssert("as_good", { assertCheck: "ROW_COUNT", assertMin: "10" }),
+		"Invalid Input Error: ASSERT ROW_COUNT: 列數 4 不在 >= 10 之內");
+	add("ASSERT ROW_COUNT fails above the upper bound",
+		runAssert("as_good", { assertCheck: "ROW_COUNT", assertMax: "2" }),
+		"Invalid Input Error: ASSERT ROW_COUNT: 列數 4 不在 <= 2 之內");
+	add("ASSERT ROW_COUNT with no bounds checks nothing (it does not fail on bad data)",
+		runAssert("as_bad", { assertCheck: "ROW_COUNT" }), "ok");
+
+	// PREDICATE
+	add("ASSERT PREDICATE passes when the predicate holds",
+		runAssert("as_good", { assertCheck: "PREDICATE", assertPredicate: "amount >= 0" }), "ok");
+	// as_bad 的 amount 有 -5 與一個 NULL → **2 列**。
+	// NULL 述句必須算違反（NOT COALESCE，而非 naive NOT）—— 這一條守的就是它。
+	add("ASSERT PREDICATE counts a null predicate as a violation (2 rows, not 1)",
+		runAssert("as_bad", { assertCheck: "PREDICATE", assertPredicate: "amount >= 0" }),
+		"Invalid Input Error: ASSERT PREDICATE: 2 列讓述句為假");
+	add("ASSERT PREDICATE reports every violating row",
+		runAssert("as_good", { assertCheck: "PREDICATE", assertPredicate: "amount > 100" }),
+		"Invalid Input Error: ASSERT PREDICATE: 4 列讓述句為假");
+
+	// 守門拋錯之後，輸出表**還在** —— 使用者要能直接去 Data Drawer 看哪幾列壞掉。
+	// 這是「守門排在建表之後」這個順序的實際價值，不是副作用。
+	{
+		let survived = "no";
+		try {
+			conn.query(
+				compiler.generateSqlFromConfig(
+					"as_surv", "ASSERT", { assertCheck: "UNIQUE", assertColumn: "id" }, ["as_bad"],
+					{ falseBranch: false },
+				),
+			);
+		} catch {
+			/* 預期會拋 */
+		}
+		try {
+			survived = String(q('SELECT COUNT(*) AS n FROM "as_surv"')[0][0]);
+		} catch {
+			survived = "gone";
+		}
+		add("the ASSERT output table survives its own failure (so the bad rows are inspectable)",
+			survived, "5");
+	}
+
+	// 被淘汰的替代方案也釘住，免得有人走回去
+	add("division by zero does NOT raise in this build (so it is not a usable guard)",
+		q("SELECT 1 / 0 AS x")[0][0], "Infinity");
+	add("the ASSERT body is a plain passthrough (safe as a CTE source)",
+		compiler.compileNodeSelect("as_node", "ASSERT", {}, ["as_good"]),
+		'SELECT * FROM "as_good"');
+	add("ASSERT needs no DuckDB extension", compiler.requiredExtensions("ASSERT"), []);
+
+	// =====================================================================
 	// 12. 視窗 / 序列組：MULTI_ROW_FORMULA / RUNNING_TOTAL / RANK
 	// =====================================================================
 	conn.query(
@@ -1464,7 +1568,17 @@ export async function runDuckDbWasmChecks(root, loadTs, fallbackPipelines = []) 
 		return [...region.matchAll(/case\s+"([A-Z_]+)":/g)].map((m) => m[1]).sort();
 	};
 
-	const compilerCases = casesIn("apps/web/src/engine/astCompiler.ts");
+	// 掃描範圍限定在 compileNodeSelect 的 `switch (nodeType)`。
+	//
+	// 為什麼要限定：全檔掃 `case "X":` 會把**其他** switch 的標籤也算進來 ——
+	// ASSERT 的守門函式有一個 `switch (check)`，標籤是 NOT_NULL / UNIQUE /
+	// ROW_COUNT / PREDICATE，於是它們被誤認成節點型別，這條斷言就紅了。
+	// 那些不是節點型別，不該長得像節點型別；所以錨在真正的型別 switch 上
+	// （`switch (nodeType)` 全檔只出現一次），而不是放寬這條斷言。
+	const compilerCases = casesIn(
+		"apps/web/src/engine/astCompiler.ts",
+		"switch (nodeType) {",
+	);
 	add("the compiler switch covers exactly the catalogued types",
 		compilerCases, catalogTypes);
 
@@ -1579,8 +1693,18 @@ export async function runDuckDbWasmChecks(root, loadTs, fallbackPipelines = []) 
 									? [{ from: "zz_probe_col", to: "zz_renamed" }]
 									: "zz_probe_col";
 		}
-		const withConfig = compiler.compileNodeSelect("probe_node", t, probeConfig, probeUpstream);
-		const bare = compiler.compileNodeSelect("probe_node", t, {}, probeUpstream);
+		// 比對的是**完整語句清單**而不是 compileNodeSelect 的本體。
+		//
+		// 為什麼：有些節點的 config 不影響本體、只影響額外的語句 —— ASSERT 就是
+		// 這樣（本體永遠是 passthrough，config 只決定守門那句）。只看本體會把它
+		// 誤判成「沒讀 config」，然後就會有人加一筆豁免，守門就爛掉了。
+		// 用語句清單對其他節點是嚴格的超集，所以是純粹的加強。
+		const withConfig = compiler
+			.compileNodeStatements("probe_node", t, probeConfig, probeUpstream)
+			.join("\n");
+		const bare = compiler
+			.compileNodeStatements("probe_node", t, {}, probeUpstream)
+			.join("\n");
 		if (withConfig !== bare) continue;
 
 		// SQL 沒變 → 再問 Polars 匯出器。它讀到了就不算死欄位。
