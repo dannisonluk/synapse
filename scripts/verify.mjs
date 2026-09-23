@@ -150,6 +150,20 @@ const stripPyComments = (src) =>
 		.filter((l) => !l.trimStart().startsWith("#"))
 		.join("\n");
 
+/**
+ * 建立一個測試用的節點。
+ *
+ * 放在檔案頂部而不是某個 section 裡：它被很多 section 用到，而 `const` 有 TDZ ——
+ * 宣告在後面會讓**先用到它的 section** 直接炸掉（實測踩過一次，訊息是
+ * `Cannot access 'mk' before initialization`，看起來像模組載入失敗）。
+ */
+const mk = (id, data, type = "alteryxNode") => ({
+	id,
+	type,
+	position: { x: 0, y: 0 },
+	data,
+});
+
 // ---------------------------------------------------------------------------
 // esbuild discovery — esbuild 只存在於 .pnpm store 內（pnpm 不會 hoist 它）
 // ---------------------------------------------------------------------------
@@ -1432,6 +1446,169 @@ section("2j. theme/tokens.ts — 主題");
 }
 
 // ===========================================================================
+// 2k. exportDbt.ts — dbt 專案匯出
+// ===========================================================================
+// 這個功能的價值在於「畫布上守的規則，匯出之後還在守」—— 所以斷言的重點是
+// ASSERT 有沒有真的變成 dbt 的 test，而且**條件與畫布上的是同一份**。
+const dbtMod = await loadTs("apps/web/src/engine/exportDbt.ts");
+section("2k. exportDbt.ts — dbt 專案匯出");
+
+{
+	const S = (label, fallback) => dbtMod.sanitiseModelName(label, fallback);
+	check("a label becomes a snake_case model name", S("Keep Big", "x"), "keep_big");
+	check("punctuation collapses to a single underscore", S("A - B", "x"), "a_b");
+	check("leading and trailing separators are trimmed", S("__x__", "x"), "x");
+	// dbt 的模型名不接受中文，也不能數字開頭
+	check("CJK becomes underscores", S("篩選金額", "node_a"), "node_a");
+	check("a digit-leading name is prefixed", S("2024 sales", "x"), "_2024_sales");
+	check("an empty label falls back", S("   ", "node_a"), "node_a");
+	check("a null label falls back", S(null, "node_a"), "node_a");
+}
+
+{
+	const nodes = [
+		mk("n1", { label: "Load", type: "INPUT_DUCKDB" }),
+		mk("n2", { label: "Filter", type: "FILTER" }),
+		mk("n3", { label: "Filter", type: "FILTER" }), // 同名 → 必須去重
+	];
+	const { byId } = dbtMod.assignModelNames(nodes);
+	check("distinct labels become distinct names", byId.get("n1"), "load");
+	check("a duplicate label falls back to label + id", byId.get("n2"), "filter");
+	check("...and the second one does not collide", byId.get("n3"), "filter_n3");
+	check("every node gets a name", byId.size, 3);
+	check("all names are unique", new Set(byId.values()).size, 3);
+}
+
+{
+	// toRefs 只換 FROM / JOIN 的位置 —— 欄位名剛好等於節點 id 時不可以被改掉
+	const byId = new Map([["node_u", "upstream_model"]]);
+	check("a FROM reference becomes a ref",
+		dbtMod.toRefs(`SELECT * FROM "node_u"`, ["node_u"], byId),
+		`SELECT * FROM {{ ref('upstream_model') }}`);
+	check("a JOIN reference becomes a ref",
+		dbtMod.toRefs(`SELECT * FROM "a" JOIN "node_u" ON 1=1`, ["node_u"], byId),
+		`SELECT * FROM "a" JOIN {{ ref('upstream_model') }} ON 1=1`);
+	// 這一條是關鍵：欄位名叫 node_u 時，字串替換會把它一起改壞
+	check("a column that happens to share the node id is left alone",
+		dbtMod.toRefs(`SELECT "node_u" FROM "node_u"`, ["node_u"], byId),
+		`SELECT "node_u" FROM {{ ref('upstream_model') }}`);
+	check("an unknown upstream is left as-is",
+		dbtMod.toRefs(`SELECT * FROM "mystery"`, ["mystery"], byId),
+		`SELECT * FROM "mystery"`);
+}
+
+{
+	// input → filter → assert(PREDICATE) → output
+	const nodes = [
+		mk("node_in", { label: "Load", type: "INPUT_DUCKDB", config: { fileName: "s.csv", tableName: "src_x" } }),
+		mk("node_f", { label: "Keep Big", type: "FILTER", config: { field: "amount", op: ">", val: "1000" } }),
+		mk("node_a", { label: "Amount OK", type: "ASSERT", config: { assertCheck: "PREDICATE", assertPredicate: "amount >= 0" } }),
+		mk("node_o", { label: "Save", type: "OUTPUT", config: { fileName: "out.csv" } }),
+		mk("node_v", { label: "Chart", type: "VIZ_CHART", config: { chartType: "BAR" } }, "vizChartNode"),
+	];
+	const edges = [
+		{ id: "e1", source: "node_in", target: "node_f" },
+		{ id: "e2", source: "node_f", target: "node_a" },
+		{ id: "e3", source: "node_a", target: "node_o" },
+		{ id: "e4", source: "node_o", target: "node_v" },
+	];
+	const proj = dbtMod.exportToDbt(nodes, edges, { projectName: "sales", sourceName: "raw" });
+
+	check("a dbt_project.yml is produced", typeof proj.files["dbt_project.yml"], "string");
+	has("...with the given project name", proj.files["dbt_project.yml"], "name: 'sales'");
+	check("every data-producing node becomes a model",
+		Object.keys(proj.files).filter((p) => p.startsWith("models/") && p.endsWith(".sql")).sort(),
+		["models/amount_ok.sql", "models/keep_big.sql", "models/load.sql", "models/save.sql"]);
+	// 檢視節點不是模型 —— 產生一個空的 model 會讓 dbt 跑出一個沒有意義的視圖
+	check("the chart node is not turned into a model",
+		Object.keys(proj.files).some((p) => p.includes("chart")), false);
+
+	has("an upstream becomes a ref", proj.files["models/keep_big.sql"], `FROM {{ ref('load') }}`);
+	// 外部檔案不是工作流產生的，不該假裝成 model
+	has("the input reads a source, not a model", proj.files["models/load.sql"], `{{ source('raw', 'src_x') }}`);
+	check("...and no temp table name leaks into the project",
+		Object.values(proj.files).join("\n").includes("CREATE OR REPLACE TEMP TABLE"), false);
+	has("the model header carries the narration",
+		proj.files["models/keep_big.sql"], "-- 從「Load」讀取，只保留 amount > 1000 的列");
+
+	// --- ASSERT → dbt test（這個功能的理由） ---
+	const schema = proj.files["models/schema.yml"];
+	has("the sources block names the external table", schema, "- name: 'src_x'");
+
+	const predTest = proj.files["tests/assert_amount_ok_predicate.sql"];
+	check("a PREDICATE assert becomes a singular test", typeof predTest, "string");
+	has("...reading the model it guards", predTest, `{{ ref('amount_ok') }}`);
+	// 這一條是整個功能的關鍵：條件必須與畫布上的守門**同一份推導**，
+	// 否則兩邊對「怎樣算違反」會有不同看法，而且只會在真的踩到時才發現。
+	has("...using the same negation as the engine guard",
+		predTest, "where NOT COALESCE((amount >= 0), FALSE)");
+	has("...and the guard uses it too",
+		sqlMod.compileNodeStatements("node_a", "ASSERT",
+			{ assertCheck: "PREDICATE", assertPredicate: "amount >= 0" }, ["node_f"]).join("\n"),
+		"WHERE NOT COALESCE((amount >= 0), FALSE)");
+	has("...and the test explains itself", predTest, "回傳 0 列才算通過");
+}
+
+{
+	// NOT_NULL / UNIQUE 單欄 → dbt 內建 test（不必自己寫 SQL）
+	const nodes = [
+		mk("n1", { label: "Load", type: "INPUT_DUCKDB", config: { fileName: "s.csv" } }),
+		mk("n2", { label: "Key OK", type: "ASSERT", config: { assertCheck: "UNIQUE", assertColumn: "id" } }),
+		mk("n3", { label: "Not Null OK", type: "ASSERT", config: { assertCheck: "NOT_NULL", assertColumn: "amount" } }),
+		mk("n4", { label: "Combo OK", type: "ASSERT", config: { assertCheck: "UNIQUE", assertColumn: "id, year" } }),
+		mk("n5", { label: "Rows OK", type: "ASSERT", config: { assertCheck: "ROW_COUNT", assertMin: "1", assertMax: "10" } }),
+		mk("n6", { label: "Noop", type: "ASSERT", config: { assertCheck: "ROW_COUNT" } }),
+	];
+	const edges = [
+		{ id: "e1", source: "n1", target: "n2" },
+		{ id: "e2", source: "n2", target: "n3" },
+		{ id: "e3", source: "n3", target: "n4" },
+		{ id: "e4", source: "n4", target: "n5" },
+		{ id: "e5", source: "n5", target: "n6" },
+	];
+	const proj = dbtMod.exportToDbt(nodes, edges);
+	const schema = proj.files["models/schema.yml"];
+
+	has("UNIQUE on one column becomes the built-in unique test", schema, "- unique");
+	has("NOT_NULL on one column becomes the built-in not_null test", schema, "- not_null");
+	has("...attached to the right column", schema, "- name: 'amount'");
+
+	// 組合鍵：dbt 的 unique test 只吃單欄，dbt_utils 需要額外套件 →
+	// 產生 singular test，不替使用者決定要裝什麼
+	has("a composite UNIQUE becomes a singular test instead",
+		proj.files["tests/assert_combo_ok_unique.sql"], "group by \"id\", \"year\"");
+	check("...and is not emitted as a built-in test on one column",
+		schema.includes("'id, year'"), false);
+
+	has("ROW_COUNT becomes a singular test",
+		proj.files["tests/assert_rows_ok_row_count.sql"], "having n < 1 OR n > 10");
+	// 兩個邊界都沒填 → 畫布上不檢查，dbt 也不該產生一個永遠通過的 test。
+	// 只看 tests/ 底下的檔案 —— 模型本身叫 noop.sql，那是應該存在的。
+	check("an unbounded ROW_COUNT produces no test",
+		Object.keys(proj.files).some((p) => p.startsWith("tests/") && p.includes("noop")), false);
+	has("...and the note says the assertion checks nothing", proj.notes.join("\n"), "沒有產生任何 test");
+}
+
+{
+	// SPATIAL_MATCH：dbt 模型裡沒有地方放 LOAD spatial → 誠實標記，不產生跑不動的模型
+	const nodes = [
+		mk("n1", { label: "Load", type: "INPUT_DUCKDB", config: { fileName: "s.csv" } }),
+		mk("n2", { label: "Nearby", type: "SPATIAL_MATCH", config: { leftGeometryField: "wkt", rightGeometryField: "wkt", spatialPredicate: "WITHIN" } }),
+	];
+	const proj = dbtMod.exportToDbt(nodes, [{ id: "e1", source: "n1", target: "n2" }]);
+	check("a spatial node is flagged for review", proj.needsReview, ["n2"]);
+	has("...with a note naming the reason", proj.notes.join("\n"), "LOAD spatial");
+	// 但仍然產生模型 —— 使用者只要補上 pre-hook 就能用
+	check("...and still produces the model", typeof proj.files["models/nearby.sql"], "string");
+}
+
+{
+	check("projectToText concatenates every file",
+		dbtMod.projectToText({ files: { "a.sql": "x", "b.yml": "y" }, notes: [], needsReview: [] }),
+		"===== a.sql =====\nx\n===== b.yml =====\ny");
+}
+
+// ===========================================================================
 // 3. Hermes patch resolution
 // ===========================================================================
 const patchMod = await loadTs("apps/web/src/engine/patch.ts");
@@ -1619,9 +1796,6 @@ if (!py) {
 const exporter = await loadTs("apps/web/src/engine/exporter.ts");
 section("5. exporter.ts — SQL CTE 匯出 + 工作流存檔/讀檔");
 
-const mk = (id, data, type = "alteryxNode") => ({
-	id, type, position: { x: 0, y: 0 }, data,
-});
 const CHAIN_NODES = [
 	mk("node_in", { label: "Input", type: "INPUT_DUCKDB", config: {} }),
 	mk("node_f", { label: "Filter", type: "FILTER", config: { field: "amount", op: ">", val: "1000" } }),
@@ -3375,6 +3549,15 @@ section("11. repo 一致性 — 衍生產物、設定檔、死程式碼");
 	// 反向：這些關鍵呼叫點若被刪掉，上面的斷言會紅；但也要確認掃描不是空的。
 	check("the wiring scan read a non-trivial file", canvasSrc.length > 10000, true);
 	check("the drawer wiring scan read a non-trivial file", drawerSrc.length > 10000, true);
+
+	// --- dbt 匯出 ---
+	has("the canvas can export a dbt project", canvasSrc, "exportToDbt(nodes, edges");
+	has("...and downloads the concatenated project", canvasSrc, "projectToText(proj)");
+	// 瀏覽器不能一次下載多個檔案，所以下載的是一份合併文字檔 ——
+	// 說明必須講清楚，否則使用者會以為拿到的是壞掉的檔案
+	has("...and tells the user the download is a merged text file",
+		canvasSrc, "===== 路徑 =====");
+	has("...and the dbt export is reachable from the palette too", canvasSrc, 'case "export-dbt":');
 
 	// --- 主題：技術債上限 ---
 	//
