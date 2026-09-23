@@ -888,6 +888,40 @@ export function producesOutputTable(nodeType: string): boolean {
 }
 
 /**
+ * PREDICATE 的否定條件（已含 COALESCE）。
+ *
+ * 抽出來是因為**兩個地方要用同一份**：
+ *   - DuckDB 的守門（`error()`）問「有幾列讓述句為假」
+ *   - dbt 的 singular test 問「哪些列讓述句為假」
+ * 條件若各寫一份，遲早會有一邊忘記 COALESCE，於是 NULL 述句在一邊算違反、
+ * 在另一邊不算 —— 而那種不一致只會在真的踩到 NULL 時才出現。
+ */
+export function assertPredicateNegation(config: NodeConfig): string {
+	// NOT COALESCE(pred, FALSE) 而非 NOT (pred)：pred 為 NULL 時 DuckDB 的
+	// NOT 仍是 NULL，那一列會「不算違反」而溜過去 —— 但述句無法判斷本身
+	// 就是資料有問題。實測 bad 資料上 `amount > 0` 抓到 2 列（負數 + NULL），
+	// naive 版只抓到 1 列。
+	return `NOT COALESCE((${safeExpr(config.assertPredicate, "TRUE")}), FALSE)`;
+}
+
+/**
+ * ROW_COUNT 的越界條件（給 WHERE / HAVING 用，欄位名固定為 `n`）。
+ *
+ * 兩個邊界都沒填 → null（= 不檢查），而不是一個永遠成立的條件。
+ */
+export function assertRowCountBreach(config: NodeConfig): string | null {
+	const min = safeAssertBound(config.assertMin);
+	const max = safeAssertBound(config.assertMax);
+	if (min === null && max === null) return null;
+	const conds: string[] = [];
+	// 邊界用裸數字，**不經 intLit** —— intLit 會 Math.floor 並把負數夾成 0
+	// （它原本是給 LIMIT/OFFSET 用的）。safeAssertBound 已保證是有限數字。
+	if (min !== null) conds.push(`n < ${min}`);
+	if (max !== null) conds.push(`n > ${max}`);
+	return conds.join(" OR ");
+}
+
+/**
  * ASSERT 的守門陳述。
  *
  * 機制是**實測**出來的，不是假設。DuckDB 有 scalar 函式 `error(msg)`，會讓整個
@@ -949,15 +983,13 @@ function assertGuardStatement(nodeId: string, config: NodeConfig): string | null
 		case "ROW_COUNT": {
 			const min = safeAssertBound(config.assertMin);
 			const max = safeAssertBound(config.assertMax);
+			// 越界條件由 assertRowCountBreach 提供 —— dbt 的 singular test
+			// 用的是同一份，所以兩邊不可能對「怎樣算越界」有不同看法。
+			// 邊界用裸數字，**不經 intLit**（它會把負數夾成 0）。
+			const breach = assertRowCountBreach(config);
 			// 兩個都沒填 = 不檢查。回 null 讓整條守門都不產生，而不是產生一條
 			// 永遠成立的語句 —— 那只是每次執行都白跑一次 COUNT(*)。
-			if (min === null && max === null) return null;
-			const conds: string[] = [];
-			if (min !== null) conds.push(`n < ${min}`);
-			if (max !== null) conds.push(`n > ${max}`);
-			// 邊界用裸數字，**不經 intLit** —— intLit 會 Math.floor 並把負數
-			// 夾成 0（它原本是給 LIMIT/OFFSET 用的）。safeAssertBound 已經保證
-			// 這裡是有限數字，直接用就好。
+			if (breach === null) return null;
 			const range =
 				min !== null && max !== null
 					? `${min}..${max}`
@@ -966,20 +998,16 @@ function assertGuardStatement(nodeId: string, config: NodeConfig): string | null
 						: `<= ${max}`;
 			return (
 				`SELECT ${fail(` 不在 ${range} 之內`, `ASSERT ${label}: 列數 `)} ` +
-				`FROM (SELECT COUNT(*) AS n FROM ${table}) WHERE ${conds.join(" OR ")};`
+				`FROM (SELECT COUNT(*) AS n FROM ${table}) WHERE ${breach};`
 			);
 		}
 
 		case "PREDICATE": {
-			// safeExpr 做結構性拒絕（擋多語句與註解），與 FORMULA 同一條守門。
-			const pred = safeExpr(config.assertPredicate, "TRUE");
-			// NOT COALESCE(pred, FALSE) 而非 NOT (pred)：pred 為 NULL 時
-			// DuckDB 的 NOT 仍是 NULL，那一列會「不算違反」而溜過去 ——
-			// 但述句無法判斷本身就是資料有問題。實測 bad 資料上
-			// `amount > 0` 抓到 2 列（負數 + NULL），naive 版只抓到 1 列。
+			// 否定條件由 assertPredicateNegation 提供 —— dbt 的 singular test
+			// 用同一份。safeExpr 在裡面做結構性拒絕（擋多語句與註解）。
 			return (
 				`SELECT ${fail(" 列讓述句為假")} ` +
-				`FROM (SELECT COUNT(*) AS n FROM ${table} WHERE NOT COALESCE((${pred}), FALSE)) ` +
+				`FROM (SELECT COUNT(*) AS n FROM ${table} WHERE ${assertPredicateNegation(config)}) ` +
 				`WHERE n > 0;`
 			);
 		}

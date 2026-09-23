@@ -58,6 +58,7 @@ import {
 	type SerializedNode,
 } from "../../engine/exporter";
 import { exportToPolars } from "../../engine/exportPolars";
+import { exportToDbt, projectToText } from "../../engine/exportDbt";
 import { downloadText } from "../../lib/download";
 import {
 	NodeKeyBook,
@@ -1028,6 +1029,35 @@ const CanvasInner: React.FC<NymphCanvasProps> = ({
 		});
 	}, [nodes, edges]);
 
+	/**
+	 * 匯出 dbt 專案。
+	 *
+	 * dbt 專案是**多個檔案**，而瀏覽器不能一次下載多個。這裡下載的是一份
+	 * 合併文字檔，用 `===== 路徑 =====` 分隔 —— 使用者按那個分隔切開即可。
+	 * 誠實地講清楚這件事，比假裝它是一個可以直接用的 zip 好。
+	 */
+	const handleExportDbt = useCallback(() => {
+		const proj = exportToDbt(nodes, edges, { projectName: "synapse_workflow" });
+		const paths = Object.keys(proj.files);
+		if (paths.length === 0) {
+			setNotice({ kind: "error", text: "畫布上沒有可匯出的節點。" });
+			return;
+		}
+
+		downloadText("synapse-dbt-project.txt", projectToText(proj), "text/plain");
+		const parts = [
+			`已匯出 dbt 專案：${paths.length} 個檔案（合併成一份文字檔，用 \`===== 路徑 =====\` 分隔）。`,
+		];
+		if (proj.notes.length > 0) parts.push(proj.notes[0]);
+		if (proj.needsReview.length > 0) {
+			parts.push(`⚠ ${proj.needsReview.length} 個節點需要手動處理（見檔案內註解）。`);
+		}
+		setNotice({
+			kind: proj.needsReview.length > 0 ? "error" : "ok",
+			text: parts.join("　"),
+		});
+	}, [nodes, edges]);
+
 	// ---------------------------------------------------------------------
 	// 自動存檔（autosave）
 	//
@@ -1348,6 +1378,7 @@ const CanvasInner: React.FC<NymphCanvasProps> = ({
 			{ id: "redo", label: "重做", hint: "⇧⌘Z", keywords: "redo 重做" },
 			{ id: "export-sql", label: "匯出 SQL", hint: "CTE", keywords: "export sql 匯出 下載" },
 			{ id: "export-python", label: "匯出 Python（Polars）", hint: ".py", keywords: "export python polars 匯出" },
+			{ id: "export-dbt", label: "匯出 dbt 專案", hint: "models + tests", keywords: "export dbt models tests 匯出" },
 			{ id: "save", label: "儲存工作流", hint: "JSON", keywords: "save 儲存 存檔" },
 			{ id: "share", label: "複製分享連結", hint: "URL", keywords: "share link 分享 連結 網址" },
 			{ id: "load", label: "載入工作流", hint: "JSON", keywords: "load import open 載入 開啟" },
@@ -1426,6 +1457,8 @@ const CanvasInner: React.FC<NymphCanvasProps> = ({
 					return handleExportSql();
 				case "export-python":
 					return handleExportPython();
+				case "export-dbt":
+					return handleExportDbt();
 				case "save":
 					return handleSaveWorkflow();
 				case "share":
@@ -1744,6 +1777,23 @@ const CanvasInner: React.FC<NymphCanvasProps> = ({
 						style={{ color: tokens.accent }}
 					/>
 					<span>Export Python</span>
+				</button>
+
+				<button
+					onClick={handleExportDbt}
+					title="匯出 dbt 專案：每個節點一個 model，ASSERT 變成 dbt 的 tests"
+					style={{
+						backgroundColor: tokens.bgCard,
+						borderColor: tokens.border,
+						color: tokens.textPrimary,
+					}}
+					className="flex items-center space-x-1.5 border text-xs px-3 py-1.5 rounded-lg shadow-sm hover:opacity-80 transition-all font-medium"
+				>
+					<FileCode
+						className="w-3.5 h-3.5"
+						style={{ color: tokens.accent }}
+					/>
+					<span>Export dbt</span>
 				</button>
 
 				<button
