@@ -1709,6 +1709,72 @@ section("2l. exportDb.ts — 寫入外部資料庫（只產生語句）");
 }
 
 // ===========================================================================
+// 2m. 遠端 Parquet（HTTP）— safeHttpUrl + INPUT_DUCKDB 的 URL 模式
+// ===========================================================================
+// 這個 URL 會被寫進**匯出的 SQL / Python**，而那些檔案會跟著工作流與分享連結
+// 傳出去。所以 scheme 白名單不是潔癖：允許 `file://` 就等於在別人分享的工作流裡
+// 放了一個讀本機檔案的入口。
+const httpMod = await loadTs("apps/web/src/engine/sql.ts");
+section("2m. 遠端 Parquet（HTTP）");
+
+{
+	const U = (v) => httpMod.safeHttpUrl(v);
+	check("https is accepted", U("https://example.com/a.parquet"), "https://example.com/a.parquet");
+	check("http is accepted", U("http://example.com/a.parquet"), "http://example.com/a.parquet");
+	check("a query string survives", U("https://example.com/a.parquet?v=2"),
+		"https://example.com/a.parquet?v=2");
+	check("a URL is normalised, not passed through raw",
+		U("HTTPS://Example.COM/a.parquet"), "https://example.com/a.parquet");
+
+	// 這些全部要拒絕 —— 每一條都是一個攻擊面
+	check("file:// is refused", U("file:///etc/passwd"), null);
+	check("a Windows file path is refused", U("C:\\Users\\me\\secrets.parquet"), null);
+	check("a javascript: URL is refused", U("javascript:alert(1)"), null);
+	check("a data: URL is refused", U("data:text/plain;base64,QQ=="), null);
+	check("ftp is refused", U("ftp://example.com/a.parquet"), null);
+	check("a relative path is refused", U("./data/a.parquet"), null);
+	check("an empty string is refused", U(""), null);
+	check("a blank string is refused", U("   "), null);
+	check("null is refused", U(null), null);
+	check("a bare scheme is refused", U("https://"), null);
+}
+
+{
+	// 編譯器：填了 URL 就編譯成 read_parquet，而且**取代**上傳檔案
+	const remote = sqlMod.compileNodeSelect("node_in", "INPUT_DUCKDB",
+		{ sourceUrl: "https://example.com/a.parquet" }, []);
+	check("a remote URL compiles to read_parquet",
+		remote, `SELECT * FROM read_parquet('https://example.com/a.parquet')`);
+	// URL 優先於已上傳的檔案：使用者填了 URL 就是改主意了
+	const both = sqlMod.compileNodeSelect("node_in", "INPUT_DUCKDB",
+		{ sourceUrl: "https://example.com/a.parquet", fileName: "old.csv", tableName: "src_x" }, []);
+	check("...and takes precedence over an uploaded file", both, remote);
+	// 不合法就退回原本的路徑，而不是產生一條壞 SQL
+	check("an illegal URL falls back to the local path",
+		sqlMod.compileNodeSelect("node_in", "INPUT_DUCKDB",
+			{ sourceUrl: "file:///etc/passwd", fileName: "a.csv", tableName: "src_x" }, []),
+		`SELECT * FROM "src_x"`);
+	// URL 是使用者可控的字串，要進 SQL 字面值
+	check("a quote in the URL is escaped",
+		sqlMod.compileNodeSelect("node_in", "INPUT_DUCKDB",
+			{ sourceUrl: "https://example.com/a'b.parquet" }, []).includes("a''b"), true);
+}
+
+{
+	// 說明要講出「畫布讀不到」—— 那句話會出現在匯出的腳本裡，
+	// 而那是使用者唯一會看到它的地方。
+	has("the narration states that the canvas cannot read it",
+		narrMod.narrateNode({ type: "INPUT_DUCKDB", config: { sourceUrl: "https://x.dev/a.parquet" } }),
+		"畫布上讀不到");
+	has("...and names the extension it needs",
+		narrMod.narrateNode({ type: "INPUT_DUCKDB", config: { sourceUrl: "https://x.dev/a.parquet" } }),
+		"httpfs");
+	// 沒有 URL 時說明不該提到遠端
+	check("a local input does not mention the remote path",
+		narrMod.narrateNode({ type: "INPUT_DUCKDB", config: { fileName: "a.csv" } }).includes("遠端"), false);
+}
+
+// ===========================================================================
 // 3. Hermes patch resolution
 // ===========================================================================
 const patchMod = await loadTs("apps/web/src/engine/patch.ts");
@@ -3694,6 +3760,28 @@ section("11. repo 一致性 — 衍生產物、設定檔、死程式碼");
 		// 反向：確認真的解析到了東西，否則上面那條會空過
 		check("...and the dispatch table was actually parsed", called.length >= 8, true);
 		check("...and the deps array was actually found", depsAt > 0, true);
+	}
+
+	// --- 遠端 Parquet：兩個引擎要對「什麼是合法來源」看法一致 ---
+	{
+		const remoteNodes = [
+			mk("node_in", { label: "Remote", type: "INPUT_DUCKDB", config: { sourceUrl: "https://example.com/a.parquet" } }),
+		];
+		const py = polars.exportToPolars(remoteNodes, []);
+		has("the Python export reads the remote Parquet too",
+			py.script, `pl.read_parquet("https://example.com/a.parquet")`);
+		has("...and says it needs a network", py.script, "需要網路");
+		// 不合法的 URL 不該產生一行會讀本機檔案的程式碼 ——
+		// 那是「別人分享給你的工作流」裡最不該存在的東西
+		const pyBad = polars.exportToPolars(
+			[mk("node_in", { label: "Bad", type: "INPUT_DUCKDB", config: { sourceUrl: "file:///etc/passwd" } })],
+			[],
+		);
+		check("an illegal URL never becomes a read_parquet call",
+			pyBad.script.includes("file:///etc/passwd"), false);
+		check("...and the SQL side refuses it too",
+			sqlMod.compileNodeSelect("node_in", "INPUT_DUCKDB",
+				{ sourceUrl: "file:///etc/passwd" }, []).includes("file:"), false);
 	}
 
 	// --- 主題：技術債上限 ---
