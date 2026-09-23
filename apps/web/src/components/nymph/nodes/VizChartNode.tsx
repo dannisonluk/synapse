@@ -44,8 +44,8 @@ const CHART_COLORS = [
 export const VizChartNode: React.FC<
 	NodeProps<Node<VizChartNodeData>>
 > = ({ id, data, selected }) => {
-	const { mode, tokens } = useTheme();
-	const isLight = mode === "claude-light";
+	// 語意布林由 context 提供，元件不再自己拿 mode 字串比較
+	const { isLight, tokens } = useTheme();
 
 	const [chartData, setChartData] = useState<any[]>([]);
 	const [loading, setLoading] = useState(false);

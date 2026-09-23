@@ -324,7 +324,7 @@ export const AlteryxNode: React.FC<NodeProps<Node<AlteryxNodeData>>> = ({
 	data,
 	selected,
 }) => {
-	const { mode, tokens } = useTheme();
+	const { isLight, tokens } = useTheme();
 	const nodeType = data.type || "FILTER";
 	const [showSqlPreview, setShowSqlPreview] = useState(false);
 	const [config, setConfig] = useState<AlteryxNodeConfig>(data.config || {});
@@ -512,8 +512,6 @@ export const AlteryxNode: React.FC<NodeProps<Node<AlteryxNodeData>>> = ({
 			alert(`檔案載入失敗: ${err?.message || "請檢查 CSV 格式"}`);
 		}
 	};
-
-	const isLight = mode === "claude-light";
 
 	// --- 擴充節點共用的樣式與小工具 -------------------------------------
 	// 這幾個 class 在新增的 11 種節點裡重複出現，抽出來免得每塊各寫一份、

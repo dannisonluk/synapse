@@ -12,6 +12,7 @@ import { DataDrawer } from "./DataDrawer";
 import { ikaros } from "../../engine/ikaros/client";
 import { ExecLogEntry } from "../../engine/scheduler";
 import { useTheme, ThemeProvider } from "../../theme/ThemeContext";
+import { ui, TYPE } from "../../theme/ui";
 import { Node, Edge } from "@xyflow/react";
 
 /**
@@ -46,7 +47,7 @@ const WorkbenchContent: React.FC = () => {
 	const [inputPrompt, setInputPrompt] = useState("");
 	const [isHermesBusy, setIsHermesBusy] = useState(false);
 
-	const { mode, setMode, tokens } = useTheme();
+	const { isLight, toggle, tokens } = useTheme();
 
 	const handleCanvasStateChange = useCallback(
 		(nodes: Node[], edges: Edge[]) => {
@@ -188,46 +189,32 @@ const WorkbenchContent: React.FC = () => {
 					<span className="font-bold font-mono tracking-tight text-sm">
 						SYNAPSE WORKBENCH
 					</span>
+					{/* 目前主題。用淡強調底而不是 `${accent}15` 這種 hex+alpha 拼接 ——
+					    後者只在 6 位 hex 下成立，換成 CSS 變數就會變成無效值。 */}
 					<span
-						style={{
-							backgroundColor: `${tokens.accent}15`,
-							color: tokens.accent,
-							borderColor: `${tokens.accent}30`,
-						}}
-						className="text-[10px] font-mono px-2 py-0.5 rounded border font-semibold"
+						className={`${TYPE.caption} font-mono px-2 py-0.5 rounded border border-transparent font-semibold ${ui.accentSoft}`}
 					>
-						{mode === "claude-light"
-							? "Claude Light Theme"
-							: "GitHub Dark Theme"}
+						{isLight ? "Light" : "Dark"}
 					</span>
 				</div>
 
-				{/* 主題切換按鈕 */}
+				{/* 主題切換。標籤寫的是「按下去會變成什麼」，不是「現在是什麼」——
+				    那才符合按鈕的語意。 */}
 				<div className="flex items-center space-x-2">
 					<button
-						onClick={() =>
-							setMode(
-								mode === "claude-light"
-									? "github-dark"
-									: "claude-light",
-							)
-						}
-						style={{
-							backgroundColor: tokens.bgCard,
-							borderColor: tokens.border,
-							color: tokens.textPrimary,
-						}}
-						className="flex items-center space-x-2 px-3 py-1.5 text-xs rounded border shadow-sm hover:opacity-80 transition-all font-medium"
+						onClick={toggle}
+						aria-label={`切換到${isLight ? "深色" : "淺色"}主題`}
+						className={ui.btn}
 					>
-						{mode === "claude-light" ? (
+						{isLight ? (
 							<>
 								<Moon className="w-3.5 h-3.5" />
-								<span>GitHub Dark</span>
+								<span>Dark</span>
 							</>
 						) : (
 							<>
-								<Sun className="w-3.5 h-3.5 text-amber-500" />
-								<span>Claude Light</span>
+								<Sun className="w-3.5 h-3.5" />
+								<span>Light</span>
 							</>
 						)}
 					</button>

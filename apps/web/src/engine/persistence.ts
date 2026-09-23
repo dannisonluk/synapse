@@ -71,3 +71,42 @@ export function clearAutosave(storage = defaultStorage()): void {
 		// 清不掉也不影響功能
 	}
 }
+
+// ---------------------------------------------------------------------------
+// 主題偏好
+// ---------------------------------------------------------------------------
+// 放在同一個模組而不是另開一個檔案：它用的是同一套「storage 可注入 +
+// 一律 try/catch」的模式，而且一樣必須在 Node 裡可測。
+//
+// 主題偏好與自動存檔**刻意分開兩個 key**：清空工作流（New）不該順便把
+// 使用者的主題選擇也清掉。
+
+export const THEME_KEY = "synapse.theme.v1";
+
+/** 只接受認識的主題名 —— 存檔裡可能有舊版的 `claude-light` */
+export function loadTheme(
+	storage = defaultStorage(),
+	valid: readonly string[] = ["light", "dark"],
+): string | null {
+	if (!storage) return null;
+	try {
+		const v = storage.getItem(THEME_KEY);
+		return v && valid.includes(v) ? v : null;
+	} catch {
+		return null;
+	}
+}
+
+export function saveTheme(
+	mode: string,
+	storage = defaultStorage(),
+): SaveResult {
+	if (!storage) return { ok: false, error: "storage 不可用" };
+	try {
+		storage.setItem(THEME_KEY, mode);
+		return { ok: true };
+	} catch (err: any) {
+		// 主題存不起來不該影響任何功能，所以失敗只回報、不拋
+		return { ok: false, error: err?.message || String(err) };
+	}
+}

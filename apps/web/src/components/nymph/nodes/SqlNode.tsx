@@ -13,8 +13,9 @@ export const SqlNode: React.FC<
 		}>
 	>
 > = ({ data, selected }) => {
-	const { mode, tokens } = useTheme();
-	const isLight = mode === "claude-light";
+	// 主題由 context 提供語意布林，元件不再自己拿 mode 字串比較 ——
+	// 模式名稱改了（claude-light → light）就只會壞在這一行，而那是很容易漏的。
+	const { isLight, tokens } = useTheme();
 
 	return (
 		<div

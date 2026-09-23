@@ -58,8 +58,8 @@ export const DataDrawer: React.FC<DataDrawerProps> = ({
 	onToggle,
 	payload,
 }) => {
-	const { mode, tokens } = useTheme();
-	const isLight = mode === "claude-light";
+	// 語意布林由 context 提供，元件不再自己拿 mode 字串比較
+	const { isLight, tokens } = useTheme();
 
 	const [tab, setTab] = useState<"data" | "logs">("data");
 	const [searchInput, setSearchInput] = useState("");

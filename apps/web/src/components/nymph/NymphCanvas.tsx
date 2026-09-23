@@ -212,8 +212,9 @@ const CanvasInner: React.FC<NymphCanvasProps> = ({
 }) => {
 	const reactFlowWrapper = useRef<HTMLDivElement>(null);
 	const { screenToFlowPosition, fitView } = useReactFlow();
-	const { mode, tokens } = useTheme();
-	const isDark = mode === "github-dark";
+	const { isLight, tokens } = useTheme();
+	// 少數真的需要反過來判斷的地方（畫布底色、粒子邊）用這個
+	const isDark = !isLight;
 
 	const [isEngineReady, setIsEngineReady] = useState(false);
 	const [engineError, setEngineError] = useState<string | null>(null);
