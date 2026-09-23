@@ -397,6 +397,9 @@ Two habits follow from this, and they apply to any harness built this way:
 > A detailed proposal for what to build next — with purpose, use cases, implementation
 > notes, difficulty, and whether each item can be held by the existing harness — lives in
 > [`doc/ROADMAP.md`](doc/ROADMAP.md). This section stays the short list.
+>
+> The two colour themes, the token system behind them, and the measured contrast ratios
+> are in [`doc/THEME.md`](doc/THEME.md).
 
 **Not yet implemented**
 * **Python code export** — DONE (Polars); see suite 8. Pandas emission is not offered. `serializeArrowTable` / `parseArrowBuffer` in `@synapse/ikaros-arrow` remain unused.

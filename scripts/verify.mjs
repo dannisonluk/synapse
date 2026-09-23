@@ -1272,6 +1272,166 @@ section("2i. shareLink.ts — 分享連結");
 }
 
 // ===========================================================================
+// 2j. theme/tokens.ts — 主題
+// ===========================================================================
+// 配色是最容易「看起來還行就過」的東西，而它同時是最容易在改動中壞掉的 ——
+// 沒有人會為了改一個灰階去跑對比度檢查。所以把它變成可斷言的數字。
+const themeMod = await loadTs("apps/web/src/theme/tokens.ts");
+const persistMod = await loadTs("apps/web/src/engine/persistence.ts");
+const ctxMod = await loadTs("apps/web/src/theme/ThemeContext.tsx");
+section("2j. theme/tokens.ts — 主題");
+
+{
+	const L = themeMod.themeTokens.light;
+	const D = themeMod.themeTokens.dark;
+
+	// 兩套主題必須定義**完全相同**的鍵，否則會出現「某個元件只在一個主題下壞掉」：
+	// 另一邊的 var(--syn-…) 解析不到，顏色會退回瀏覽器預設（通常是透明或黑）。
+	check("both themes define exactly the same tokens",
+		Object.keys(L).sort(), Object.keys(D).sort());
+	check("...and that set is not empty", Object.keys(L).length > 20, true);
+	check("...and matches the declared key list",
+		Object.keys(L).sort(), [...themeMod.TOKEN_KEYS].sort());
+
+	// 每一個值都要是能被解析的顏色 —— 打錯一個字元會讓 var() 變成無效值，
+	// 而無效值在瀏覽器裡是**靜默**的（退回 inherit），非常難查。
+	const unparsable = [];
+	for (const [modeName, tokens] of [["light", L], ["dark", D]]) {
+		for (const [k, v] of Object.entries(tokens)) {
+			if (/^rgba?\(/.test(String(v))) continue;
+			if (themeMod.parseHex(v) === null) unparsable.push(`${modeName}.${k}=${v}`);
+		}
+	}
+	check("every token is a parsable colour", unparsable, []);
+
+	// CSS 變數名：camelCase → kebab-case，而且必須是合法的自訂屬性名
+	check("token names become kebab-case CSS variables",
+		themeMod.cssVariableName("bgPanel"), "--syn-bg-panel");
+	check("...and a single-word token stays simple",
+		themeMod.cssVariableName("border"), "--syn-border");
+	const vars = themeMod.cssVariables(L);
+	check("the variable set covers every token",
+		Object.keys(vars).length, Object.keys(L).length);
+	check("...with every name prefixed", Object.keys(vars).every((k) => k.startsWith("--syn-")), true);
+}
+
+// --- 對比度 ---------------------------------------------------------------
+// WCAG AA：一般文字 4.5:1、大字 3:1、非文字（圖示／邊框）3:1。
+//
+// 這裡刻意用「小字」的標準要求次要文字，因為本專案的提示文字就是 10–12px。
+// 大字標準（3:1）只用在 hover 這種短暫狀態上。
+{
+	const pairs = [];
+	for (const [name, t] of [["light", themeMod.themeTokens.light], ["dark", themeMod.themeTokens.dark]]) {
+		// 主要文字放在任何表面上都要能讀（AAA 7:1 —— 內文用得到）
+		for (const surface of ["bgCanvas", "bgPanel", "bgCard"]) {
+			pairs.push([`${name}: textPrimary on ${surface}`, t.textPrimary, t[surface], 7]);
+			pairs.push([`${name}: textSecondary on ${surface}`, t.textSecondary, t[surface], 4.5]);
+			pairs.push([`${name}: textMuted on ${surface}`, t.textMuted, t[surface], 4.5]);
+		}
+		// 強調色底上的文字（按鈕）
+		pairs.push([`${name}: textOnAccent on accent`, t.textOnAccent, t.accent, 4.5]);
+		// 淡強調底上的文字（標籤）
+		pairs.push([`${name}: accentSoftText on accentSoft`, t.accentSoftText, t.accentSoft, 4.5]);
+		// 強調色本身當成圖示／連結用
+		pairs.push([`${name}: accent on bgCanvas`, t.accent, t.bgCanvas, 3]);
+		// 語意色當成文字用
+		pairs.push([`${name}: danger on bgCanvas`, t.danger, t.bgCanvas, 4.5]);
+		pairs.push([`${name}: success on bgCanvas`, t.success, t.bgCanvas, 4.5]);
+		pairs.push([`${name}: warning on bgCanvas`, t.warning, t.bgCanvas, 4.5]);
+		// 輸入框底與畫布底必須看得出差別（否則輸入框會「消失」）
+		pairs.push([`${name}: border vs bgCanvas`, t.border, t.bgCanvas, 1.3]);
+	}
+
+	const failing = [];
+	for (const [label, fg, bg, min] of pairs) {
+		const ratio = themeMod.contrastRatio(fg, bg);
+		if (ratio === null || ratio < min) {
+			failing.push(`${label}: ${ratio === null ? "無法解析" : ratio.toFixed(2)} < ${min}`);
+		}
+	}
+	check("every text/surface pair meets its WCAG threshold", failing, []);
+
+	// 反向：確認這組檢查不是空的（否則上面那條永遠是綠的）
+	check("...and the contrast check is not vacuous", pairs.length >= 30, true);
+	// 而它真的會抓到壞的配對
+	check("the contrast check rejects white on white",
+		themeMod.contrastRatio("#FFFFFF", "#FFFFFF") < 1.01, true);
+	check("the contrast check rejects white on a mid grey",
+		themeMod.contrastRatio("#FFFFFF", "#999999") < 4.5, true);
+	// 反向的陷阱：黑字配中灰是**過關**的（灰比黑亮，對比反而夠）。
+	// 寫斷言時很容易憑直覺把這個當成「該失敗」的例子。
+	check("...but black on that same grey passes, which is not intuitive",
+		themeMod.contrastRatio("#000000", "#999999") > 4.5, true);
+	check("contrast is symmetric",
+		themeMod.contrastRatio("#000000", "#FFFFFF"), themeMod.contrastRatio("#FFFFFF", "#000000"));
+	check("an unparsable colour yields null, not a wrong number",
+		themeMod.contrastRatio("var(--syn-bg)", "#FFFFFF"), null);
+	// 短寫法（#RGB）也要能解析 —— 否則有人用 #fff 就會被誤判成「無法解析」
+	check("3-digit hex is parsed", themeMod.parseHex("#fff"), [255, 255, 255]);
+	check("...and #abc expands each digit", themeMod.parseHex("#abc"), [170, 187, 204]);
+}
+
+// --- 初始主題的決定 -------------------------------------------------------
+{
+	// 順序不能顛倒：使用者手動選過的主題不該被系統設定蓋掉
+	check("a saved preference wins over the system", ctxMod.resolveInitialMode("dark", false), "dark");
+	check("...in the other direction too", ctxMod.resolveInitialMode("light", true), "light");
+	check("with no saved preference, follow the system (dark)",
+		ctxMod.resolveInitialMode(null, true), "dark");
+	check("with no saved preference, follow the system (light)",
+		ctxMod.resolveInitialMode(null, false), "light");
+	// 舊版存的是 claude-light / github-dark，那些值現在不合法 → 當成沒存過
+	check("an unknown saved value falls back to the system",
+		ctxMod.resolveInitialMode("claude-light", true), "dark");
+	check("...and to the default when the system says nothing",
+		ctxMod.resolveInitialMode("garbage", false), "light");
+
+	// matchMedia 可能不存在（SSR / 測試環境 / 舊瀏覽器）
+	check("no matchMedia means light, not a crash", ctxMod.systemPrefersDark(null), false);
+	check("a dark system preference is detected",
+		ctxMod.systemPrefersDark(() => ({ matches: true })), true);
+	check("a light system preference is detected",
+		ctxMod.systemPrefersDark(() => ({ matches: false })), false);
+	check("a throwing matchMedia is handled",
+		ctxMod.systemPrefersDark(() => {
+			throw new Error("nope");
+		}), false);
+	check("...and the query it asks for is the right one",
+		ctxMod.systemPrefersDark((q) => ({ matches: q === "(prefers-color-scheme: dark)" })), true);
+}
+
+// --- 主題偏好的持久化 -----------------------------------------------------
+{
+	const makeStorage = () => {
+		const map = new Map();
+		return {
+			map,
+			getItem: (k) => (map.has(k) ? map.get(k) : null),
+			setItem: (k, v) => map.set(k, v),
+			removeItem: (k) => map.delete(k),
+		};
+	};
+
+	const s = makeStorage();
+	check("a fresh storage has no theme preference", persistMod.loadTheme(s), null);
+	check("saving reports success", persistMod.saveTheme("dark", s), { ok: true });
+	check("...and the preference round-trips", persistMod.loadTheme(s), "dark");
+	// 與自動存檔分開兩個 key：清空工作流不該順便把主題也清掉
+	check("the theme key is separate from the autosave key",
+		persistMod.THEME_KEY === persistMod.AUTOSAVE_KEY, false);
+	check("the theme key is versioned", persistMod.THEME_KEY, "synapse.theme.v1");
+	check("...and is what was actually written", s.map.has(persistMod.THEME_KEY), true);
+
+	// 舊版的存檔裡可能有 claude-light —— 那不是合法的值，要當成沒存過
+	s.setItem(persistMod.THEME_KEY, "claude-light");
+	check("a stale value from the old naming is ignored", persistMod.loadTheme(s), null);
+
+	check("storage being unavailable is not an error", persistMod.loadTheme(null), null);
+	check("...and saving reports it", persistMod.saveTheme("dark", null).ok, false);
+}
+
+// ===========================================================================
 // 3. Hermes patch resolution
 // ===========================================================================
 const patchMod = await loadTs("apps/web/src/engine/patch.ts");
@@ -3215,6 +3375,71 @@ section("11. repo 一致性 — 衍生產物、設定檔、死程式碼");
 	// 反向：這些關鍵呼叫點若被刪掉，上面的斷言會紅；但也要確認掃描不是空的。
 	check("the wiring scan read a non-trivial file", canvasSrc.length > 10000, true);
 	check("the drawer wiring scan read a non-trivial file", drawerSrc.length > 10000, true);
+
+	// --- 主題：技術債上限 ---
+	//
+	// 這些檔案還在使用 `isLight ? "bg-stone-50" : "bg-slate-900"` —— 每多一處，
+	// 兩套主題就多一個可能分岔的地方（實際上已經分岔了：有些地方淺色用 stone、
+	// 有些用 gray；深色有的 slate 有的 gray-900）。
+	//
+	// **上限只可以往下調，不可以往上調。** 新增程式碼要直接用 theme/ui.ts 的
+	// 語意常數，那裡的顏色來自 `--syn-*`，不需要判斷主題。
+	//
+	// 遷移方式：`isLight ? "bg-stone-50/80 border-stone-200/60" : "bg-slate-900/60 border-slate-800"`
+	//        → `${ui.subtle} ${ui.border}`
+	const THEME_BRANCH_BUDGET = {
+		"apps/web/src/components/nymph/nodes/AlteryxNode.tsx": 53,
+		"apps/web/src/components/nymph/nodes/SqlNode.tsx": 2,
+		"apps/web/src/components/nymph/nodes/VizChartNode.tsx": 18,
+		"apps/web/src/components/nymph/NymphCanvas.tsx": 2,
+		"apps/web/src/components/workbench/DataDrawer.tsx": 16,
+		"apps/web/src/components/workbench/UnifiedWorkbench.tsx": 4,
+	};
+	/**
+	 * 去掉註解行之後的原始碼。
+	 *
+	 * 為什麼需要：文件裡會**提到**這個模式（例如「這個檔案沒有任何
+	 * `isLight ? ... : ...`」），而那不是技術債。守門若把說明文字算進去，
+	 * 就會逼人不敢寫註解 —— 那是拿註解換紅燈，方向錯了。
+	 *
+	 * 只處理行註解與 JSDoc 行（`//`、`*`、`/*` 開頭）。字串裡出現 `//` 的
+	 * 情況這裡不管 —— 這個守門只需要「不會把說明算成債」。
+	 */
+	const codeOnly = (rel) =>
+		read(rel)
+			.split("\n")
+			.filter((l) => {
+				const t = l.trimStart();
+				return !t.startsWith("//") && !t.startsWith("*") && !t.startsWith("/*");
+			})
+			.join("\n");
+
+	{
+		const over = [];
+		for (const [rel, max] of Object.entries(THEME_BRANCH_BUDGET)) {
+			const n = (codeOnly(rel).match(/isLight/g) ?? []).length;
+			if (n > max) over.push(`${rel}: ${n} > ${max}`);
+		}
+		check("no file exceeds its theme-branch budget (the ceiling only goes down)", over, []);
+		// 全部遷移完的檔案必須維持在 0，否則新程式碼會默默走回舊路
+		const regressed = ["apps/web/src/components/workbench/CommandPalette.tsx"]
+			.filter((rel) => /isLight\s*\?/.test(codeOnly(rel)));
+		check("fully migrated components stay migrated", regressed, []);
+	}
+
+	// --- 字體層級：9px 退場 ---
+	//
+	// 9px 在一般 DPI 下低於可讀下限，而它最常被用在「其實很重要的提示」上。
+	// TYPE.caption 的下限是 10px，所以這個數字也一樣只可以往下調。
+	{
+		const n9 = (read("apps/web/src/components/nymph/nodes/AlteryxNode.tsx").match(/text-\[9px\]/g) ?? []).length;
+		check("the 9px class is not spreading in the node forms (ceiling: 72)", n9 <= 72, true);
+		// TYPE 的四級必須真的存在，而且不含 9px
+		const uiSrc = read("apps/web/src/theme/ui.ts");
+		check("the typography scale defines four levels",
+			["title", "body", "mono", "caption"].every((k) => new RegExp(`\\b${k}:`).test(uiSrc)), true);
+		check("...and none of them is 9px", /text-\[9px\]/.test(uiSrc), false);
+	}
 
 	// --- Join 鍵建議 ---
 	{
