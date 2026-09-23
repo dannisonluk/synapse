@@ -64,8 +64,29 @@ function skipSpawnNotice(what) {
  * 因此：所有輸出都經過 brief()，並且註冊未捕捉例外的處理器。
  */
 const MAX_OUT = 400;
+
+/**
+ * 把任何值轉成可比較、可顯示的字串。
+ *
+ * 為什麼不能直接用 JSON.stringify：
+ *   - `JSON.stringify(undefined)` 回傳的是 **undefined（不是字串）**，
+ *     於是 `s.length` 會 TypeError。
+ *   - `JSON.stringify(1n)`（BigInt）與含循環參照的物件會**直接拋**。
+ *
+ * 這兩個都會讓**失敗訊息的產生器自己炸掉**，把真正的失敗藏起來 ——
+ * 而「預期 undefined 但拿到別的東西」是一個完全正常的斷言。
+ * 修 harness 的例外，不是修斷言。
+ */
+function serialise(v) {
+	try {
+		return JSON.stringify(v) ?? String(v);
+	} catch {
+		return String(v);
+	}
+}
+
 function brief(v) {
-	const s = typeof v === "string" ? v : JSON.stringify(v);
+	const s = typeof v === "string" ? v : serialise(v);
 	return s.length > MAX_OUT ? `${s.slice(0, MAX_OUT)}… (+${s.length - MAX_OUT} 字元已省略)` : s;
 }
 
@@ -86,8 +107,8 @@ const checkNames = [];
 function check(name, actual, expected) {
 	checks++;
 	checkNames.push(name);
-	const a = JSON.stringify(actual);
-	const e = JSON.stringify(expected);
+	const a = serialise(actual);
+	const e = serialise(expected);
 	if (a === e) {
 		console.log(`  \x1b[32mPASS\x1b[0m  ${name}`);
 	} else {
@@ -1112,6 +1133,142 @@ section("2h. suggest.ts — Join 鍵建議");
 		sugMod.suggestJoinKeys([{ name: "id" }], [{ name: "id" }])[0].score, 105);
 	check("...and the reason omits the type clause",
 		sugMod.suggestJoinKeys([{ name: "id" }], [{ name: "id" }])[0].reason, "名稱相同");
+}
+
+// ===========================================================================
+// 2i. shareLink.ts — 可分享的工作流連結
+// ===========================================================================
+const shareMod = await loadTs("apps/web/src/engine/shareLink.ts");
+section("2i. shareLink.ts — 分享連結");
+
+{
+	// 有衍生欄位、有回呼函式、有 CJK —— 模擬真實的節點
+	const node = {
+		id: "node_a",
+		type: "alteryxNode",
+		position: { x: 1, y: 2 },
+		data: {
+			label: "篩選金額",
+			type: "FILTER",
+			config: { field: "amount", op: ">", val: "1000" },
+			sqlQuery: "CREATE OR REPLACE TEMP TABLE ... 很長的字串",
+			executionState: "SUCCESS",
+			upstreamTables: ["raw_data"],
+			onExecute: () => {},
+			onChangeConfig: () => {},
+		},
+	};
+	const wf = { version: 1, title: "測試", nodes: [node], edges: [] };
+	const slim = shareMod.toShareable(wf);
+	const d = slim.nodes[0].data;
+
+	// 剝掉的是「推導得出來」與「執行期才有」的東西
+	check("the derived SQL is stripped (it is recompiled on import)",
+		"sqlQuery" in d, false);
+	check("the execution state is stripped", "executionState" in d, false);
+	check("the resolved upstream schema is stripped", "upstreamTables" in d, false);
+	check("callbacks are stripped", "onExecute" in d || "onChangeConfig" in d, false);
+	// 真正要存下來的東西一個都不能少
+	check("the label survives", d.label, "篩選金額");
+	check("the type survives", d.type, "FILTER");
+	check("the config survives", d.config, { field: "amount", op: ">", val: "1000" });
+	check("the node id survives", slim.nodes[0].id, "node_a");
+	check("the position survives", slim.nodes[0].position, { x: 1, y: 2 });
+	check("the workflow title survives", slim.title, "測試");
+	// 不可以動到輸入 —— 呼叫端可能還要用原本那一份
+	check("toShareable does not mutate its input", node.data.sqlQuery !== undefined, true);
+	check("a non-object input is passed through", shareMod.toShareable(null), null);
+	check("a workflow without nodes normalises to an empty list",
+		shareMod.toShareable({ title: "x" }).nodes, []);
+}
+
+{
+	const wf = {
+		version: 1,
+		nodes: [
+			{ id: "n1", type: "alteryxNode", position: { x: 0, y: 0 },
+				data: { label: "載入 CSV", type: "INPUT_DUCKDB", config: { fileName: "銷售.csv" },
+					sqlQuery: "SELECT * FROM src" } },
+		],
+		edges: [],
+	};
+	const enc = shareMod.encodeShareLink(wf);
+	check("encoding succeeds", enc.ok, true);
+	check("...and reports the token length", typeof enc.length, "number");
+	// base64url：fragment 裡不可以出現 + / =
+	check("the token is base64url (no +, / or =)",
+		/[+/=]/.test(enc.token), false);
+
+	const dec = shareMod.decodeShareLink(enc.token);
+	check("decoding succeeds", dec.ok, true);
+	check("the round-trip preserves the CJK label",
+		dec.workflow.nodes[0].data.label, "載入 CSV");
+	check("...and the CJK filename",
+		dec.workflow.nodes[0].data.config.fileName, "銷售.csv");
+	check("...and drops the derived SQL again",
+		"sqlQuery" in dec.workflow.nodes[0].data, false);
+}
+
+{
+	// 超過上限必須**明確失敗**。產生一條會被聊天軟體截斷的連結，
+	// 比產生一條「太長了」的訊息糟得多：前者打開後是壞的，而且沒有線索。
+	const big = {
+		version: 1,
+		nodes: Array.from({ length: 200 }, (_, i) => ({
+			id: `node_${i}`, type: "alteryxNode", position: { x: i, y: i },
+			data: { label: `節點 ${i}`, type: "FILTER", config: { field: `field_${i}`, op: ">", val: String(i) } },
+		})),
+		edges: [],
+	};
+	const enc = shareMod.encodeShareLink(big, 1000);
+	check("an oversized workflow is refused", enc.ok, false);
+	check("...with the actual length in the message", enc.length > 1000, true);
+	has("...and a message that points at the alternative", enc.error, "匯出工作流 JSON");
+	// 上限放寬之後就過得了 —— 證明拒絕的理由是長度，不是內容
+	check("the same workflow fits under a larger limit",
+		shareMod.encodeShareLink(big, 100000).ok, true);
+	check("an unserialisable workflow is refused, not thrown",
+		shareMod.encodeShareLink({ nodes: [], edges: [], bad: 1n }).ok, false);
+	check("an empty payload is refused", shareMod.encodeShareLink(null).ok, false);
+}
+
+{
+	// 解碼要對「壞掉的輸入」有明確反應，而不是產生一個半殘的工作流
+	check("an empty token is refused", shareMod.decodeShareLink("").ok, false);
+	check("a whitespace token is refused", shareMod.decodeShareLink("   ").ok, false);
+	check("a non-base64 token is refused", shareMod.decodeShareLink("!!!not base64!!!").ok, false);
+	// 合法 base64 但不是 JSON
+	const notJson = shareMod.encodeShareLink({ nodes: [], edges: [] }).token;
+	check("a valid token decodes", shareMod.decodeShareLink(notJson).ok, true);
+	check("a truncated token is refused", shareMod.decodeShareLink(notJson.slice(0, 6)).ok, false);
+	// 是 JSON 但形狀不對
+	const wrongShape = btoa(JSON.stringify({ hello: "world" })).replace(/=+$/, "");
+	check("JSON that is not a workflow is refused",
+		shareMod.decodeShareLink(wrongShape).ok, false);
+	has("...and says what is missing", shareMod.decodeShareLink(wrongShape).error, "nodes");
+}
+
+{
+	// fragment 而不是 query string：fragment 不會送到伺服器，
+	// 所以工作流內容不會出現在任何 access log 裡。
+	check("a token is read from the fragment",
+		shareMod.readShareToken("https://x.dev/#w=ABC"), "ABC");
+	check("a query string is ignored (it would reach the server)",
+		shareMod.readShareToken("https://x.dev/?w=ABC"), null);
+	check("other fragment params are tolerated",
+		shareMod.readShareToken("https://x.dev/#a=1&w=XYZ&b=2"), "XYZ");
+	check("no fragment means no token", shareMod.readShareToken("https://x.dev/"), null);
+	check("an empty value is treated as absent",
+		shareMod.readShareToken("https://x.dev/#w="), null);
+	check("a non-object url is safe", shareMod.readShareToken(null), null);
+
+	check("buildShareUrl keeps the base and replaces the fragment",
+		shareMod.buildShareUrl("https://x.dev/app?old=1#w=OLD", "NEW"),
+		"https://x.dev/app?old=1#w=NEW");
+	// 往返：產生連結 → 讀回來
+	const url = shareMod.buildShareUrl("https://x.dev/", "TOKEN123");
+	check("a built url round-trips through the reader",
+		shareMod.readShareToken(url), "TOKEN123");
 }
 
 // ===========================================================================
@@ -3074,6 +3231,23 @@ section("11. repo 一致性 — 衍生產物、設定檔、死程式碼");
 			nodeSrc.split("suggestJoinKeys(left, right, 1)").length - 1, 2);
 	}
 
+	// --- 分享連結 ---
+	has("the canvas can produce a share link", canvasSrc, "encodeShareLink({");
+	has("...copies it to the clipboard", canvasSrc, "navigator.clipboard.writeText");
+	// 剪貼簿 API 在非 HTTPS 或未授權時會失敗 —— 那時要把連結顯示出來，
+	// 而不是說「失敗了」讓使用者無從取得
+	has("...and falls back to showing the link when the clipboard is unavailable",
+		canvasSrc, "請手動複製");
+	has("...reads a shared link from the fragment on mount",
+		canvasSrc, "readShareToken(window.location.href)");
+	// 自動存檔還原的內容是使用者自己的，不該被一條網址蓋掉
+	has("...and refuses to overwrite a canvas that already has content",
+		canvasSrc, "沒有自動覆蓋");
+	// 只該有一份匯入驗證邏輯
+	has("...and reuses the file-import validator instead of a second one",
+		canvasSrc, "importWorkflowJson(JSON.stringify(dec.workflow))");
+	has("...and is reachable from the palette too", canvasSrc, 'case "share":');
+
 	// --- 執行計畫（EXPLAIN）---
 	{
 		const nodeSrc = read("apps/web/src/components/nymph/nodes/AlteryxNode.tsx");
@@ -3120,6 +3294,22 @@ section("12. harness 自身的一致性");
 	const dupes = [...new Set(checkNames.filter((n, i) => checkNames.indexOf(n) !== i))].sort();
 	check("no two assertions share a name", dupes, []);
 	check("the name list is not empty (so the check is not vacuous)", checkNames.length > 0, true);
+
+	// reporter 自己也要能處理所有合法的值。
+	//
+	// 為什麼要測這個：`JSON.stringify(undefined)` 回傳的是 **undefined（不是字串）**，
+	// 所以「預期 undefined 但拿到別的東西」會讓 brief() 拋 TypeError，
+	// 把真正的失敗換成一個 uncaughtException —— 失敗訊息就此消失。
+	// 一個會把失敗藏起來的 reporter，比沒有 reporter 更糟。
+	check("the reporter serialises undefined", serialise(undefined), "undefined");
+	check("the reporter serialises null", serialise(null), "null");
+	check("the reporter serialises BigInt (JSON.stringify throws on it)", serialise(1n), "1");
+	check("the reporter serialises a circular object", (() => {
+		const o = {};
+		o.self = o;
+		return serialise(o).startsWith("[object");
+	})(), true);
+	check("brief truncates a long string", brief("x".repeat(600)).length < 600, true);
 }
 
 // ===========================================================================
