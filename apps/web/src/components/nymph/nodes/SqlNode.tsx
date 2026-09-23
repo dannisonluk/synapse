@@ -15,7 +15,7 @@ export const SqlNode: React.FC<
 > = ({ data, selected }) => {
 	// 主題由 context 提供語意布林，元件不再自己拿 mode 字串比較 ——
 	// 模式名稱改了（claude-light → light）就只會壞在這一行，而那是很容易漏的。
-	const { isLight, tokens } = useTheme();
+	const { tokens } = useTheme();
 
 	return (
 		<div
@@ -32,10 +32,10 @@ export const SqlNode: React.FC<
 				type="target"
 				position={Position.Left}
 				style={{ backgroundColor: tokens.accent }}
-				className="w-2.5 h-2.5 border-2 border-white dark:border-slate-900 -left-1.5"
+				className="w-2.5 h-2.5 border-2 border-[var(--syn-bg-card)] -left-1.5"
 			/>
 
-			<div className="flex items-center justify-between pb-2 border-b border-stone-200/50 dark:border-slate-800">
+			<div className="flex items-center justify-between pb-2 border-b border-[var(--syn-border)]">
 				<div className="flex items-center space-x-2">
 					<Database className="w-4 h-4 text-cyan-500" />
 					<span className="font-bold">
@@ -51,7 +51,7 @@ export const SqlNode: React.FC<
 			</div>
 
 			<div
-				className={`mt-2.5 p-2 rounded border font-mono text-[10px] ${isLight ? "bg-stone-100 border-stone-200 text-stone-800" : "bg-slate-950 border-slate-800 text-slate-300"}`}
+				className={`mt-2.5 p-2 rounded border font-mono text-[10px] bg-[var(--syn-bg-code)] border-[var(--syn-border)] text-[var(--syn-text-code)]`}
 			>
 				<code>{data.sqlQuery}</code>
 			</div>
@@ -67,7 +67,7 @@ export const SqlNode: React.FC<
 				type="source"
 				position={Position.Right}
 				style={{ backgroundColor: tokens.accent }}
-				className="w-2.5 h-2.5 border-2 border-white dark:border-slate-900 -right-1.5"
+				className="w-2.5 h-2.5 border-2 border-[var(--syn-bg-card)] -right-1.5"
 			/>
 		</div>
 	);

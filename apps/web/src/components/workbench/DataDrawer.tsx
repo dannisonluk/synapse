@@ -22,26 +22,22 @@ import { InspectedNodePayload } from "../nymph/NymphCanvas";
 const PAGE_SIZE = 100;
 
 /** DuckDB 型態 → badge 色系 */
-function typeBadgeClass(type: string, isLight: boolean): string {
+function typeBadgeClass(type: string): string {
 	const t = type.toUpperCase();
 	if (t.includes("INT") || t.includes("HUGEINT") || t.includes("UINT")) {
-		return isLight ? "bg-blue-100 text-blue-700" : "bg-blue-950 text-blue-300";
+		return "bg-[var(--syn-accent-soft)] text-[var(--syn-accent-soft-text)]";
 	}
 	if (t.includes("DOUBLE") || t.includes("FLOAT") || t.includes("DECIMAL")) {
-		return isLight
-			? "bg-emerald-100 text-emerald-700"
-			: "bg-emerald-950 text-emerald-300";
+		return "bg-[var(--syn-success-soft)] text-[var(--syn-success)]";
 	}
 	if (t.includes("TIMESTAMP") || t.includes("DATE") || t.includes("TIME")) {
-		return isLight
-			? "bg-purple-100 text-purple-700"
-			: "bg-purple-950 text-purple-300";
+		return "bg-[var(--syn-bg-active)] text-[var(--syn-text-secondary)]";
 	}
 	if (t.includes("BOOL")) {
-		return isLight ? "bg-amber-100 text-amber-700" : "bg-amber-950 text-amber-300";
+		return "bg-[var(--syn-warning-soft)] text-[var(--syn-warning)]";
 	}
 	// VARCHAR / 其他
-	return isLight ? "bg-stone-100 text-stone-700" : "bg-slate-800 text-slate-400";
+	return "bg-[var(--syn-bg-active)] text-[var(--syn-text-secondary)]";
 }
 
 const cellText = (v: any) =>
@@ -59,7 +55,7 @@ export const DataDrawer: React.FC<DataDrawerProps> = ({
 	payload,
 }) => {
 	// 語意布林由 context 提供，元件不再自己拿 mode 字串比較
-	const { isLight, tokens } = useTheme();
+	const { tokens } = useTheme();
 
 	const [tab, setTab] = useState<"data" | "logs">("data");
 	const [searchInput, setSearchInput] = useState("");
@@ -199,19 +195,19 @@ export const DataDrawer: React.FC<DataDrawerProps> = ({
 	const logColor = (level: ExecLogEntry["level"]) => {
 		switch (level) {
 			case "SUCCESS":
-				return isLight ? "text-emerald-700" : "text-emerald-400";
+				return "text-[var(--syn-success)]";
 			case "ERROR":
-				return isLight ? "text-rose-700" : "text-rose-400";
+				return "text-[var(--syn-danger)]";
 			case "CHAOS":
-				return isLight ? "text-amber-700" : "text-amber-400";
+				return "text-[var(--syn-warning)]";
 			case "SQL":
-				return isLight ? "text-sky-700" : "text-sky-400";
+				return "text-[var(--syn-accent)]";
 			case "SKIP":
 				// 快取命中的顏色刻意低調（紫），但要與 INFO 的灰明顯不同 ——
 				// 「這個節點沒跑」是使用者必須一眼看到的資訊。
-				return isLight ? "text-violet-700" : "text-violet-400";
+				return "text-[var(--syn-text-secondary)]";
 			default:
-				return isLight ? "text-stone-600" : "text-slate-400";
+				return "text-[var(--syn-text-secondary)]";
 		}
 	};
 
@@ -222,8 +218,8 @@ export const DataDrawer: React.FC<DataDrawerProps> = ({
 		).padStart(2, "0")}.${String(d.getMilliseconds()).padStart(3, "0")}`;
 	};
 
-	const surfaceBg = isLight ? "#FDFBF7" : "#0D1117";
-	const stickyBg = isLight ? "#FDFBF7" : "#161B22";
+	const surfaceBg = "var(--syn-bg-canvas)";
+	const stickyBg = "var(--syn-bg-panel)";
 
 	return (
 		<footer
@@ -514,7 +510,6 @@ export const DataDrawer: React.FC<DataDrawerProps> = ({
 															<span
 																className={`px-1 rounded text-[8px] font-bold shrink-0 ${typeBadgeClass(
 																	typeByColumn[col],
-																	isLight,
 																)}`}
 															>
 																{typeByColumn[

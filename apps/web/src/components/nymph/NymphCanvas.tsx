@@ -213,9 +213,7 @@ const CanvasInner: React.FC<NymphCanvasProps> = ({
 }) => {
 	const reactFlowWrapper = useRef<HTMLDivElement>(null);
 	const { screenToFlowPosition, fitView } = useReactFlow();
-	const { isLight, tokens } = useTheme();
-	// 少數真的需要反過來判斷的地方（畫布底色、粒子邊）用這個
-	const isDark = !isLight;
+	const { tokens } = useTheme();
 
 	const [isEngineReady, setIsEngineReady] = useState(false);
 	const [engineError, setEngineError] = useState<string | null>(null);
@@ -1878,14 +1876,16 @@ const CanvasInner: React.FC<NymphCanvasProps> = ({
 						<div
 							className="p-2 px-3 rounded-lg text-xs shadow-lg flex items-center space-x-2 backdrop-blur border animate-fade-in"
 							style={{
-								backgroundColor: tokens.bgCard,
-								borderColor: "#F59E0B80",
-								color: isDark ? "#FCD34D" : "#92400E",
+								// 用語意色的 soft 底而不是卡片底：橫幅要靠**底色**分辨狀態，
+								// 只靠一條細邊框的話在一堆浮層裡看不出來。
+								backgroundColor: "var(--syn-warning-soft)",
+								borderColor: "var(--syn-warning)",
+								color: "var(--syn-warning)",
 							}}
 						>
 							<Wrench
 								className="w-3.5 h-3.5 shrink-0 animate-spin"
-								style={{ color: "#F59E0B" }}
+								style={{ color: "var(--syn-warning)" }}
 							/>
 							<span>{chaosLog}</span>
 						</div>
@@ -1895,17 +1895,18 @@ const CanvasInner: React.FC<NymphCanvasProps> = ({
 						<div
 							className="p-2 px-3 rounded-lg text-xs shadow-lg flex items-start space-x-2 backdrop-blur border animate-fade-in"
 							style={{
-								backgroundColor: tokens.bgCard,
+								backgroundColor:
+									notice.kind === "ok"
+										? "var(--syn-success-soft)"
+										: "var(--syn-danger-soft)",
 								borderColor:
-									notice.kind === "ok" ? "#10B98180" : "#EF444480",
+									notice.kind === "ok"
+										? "var(--syn-success)"
+										: "var(--syn-danger)",
 								color:
 									notice.kind === "ok"
-										? isDark
-											? "#6EE7B7"
-											: "#065F46"
-										: isDark
-											? "#FCA5A5"
-											: "#991B1B",
+										? "var(--syn-success)"
+										: "var(--syn-danger)",
 							}}
 						>
 							<span className="shrink-0">

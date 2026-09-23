@@ -104,6 +104,25 @@ export const ui = {
 	input:
 		"w-full px-2 py-1 rounded-md border border-[var(--syn-border)] bg-[var(--syn-bg-input)] text-[var(--syn-text-primary)] text-[12px] font-mono placeholder:text-[var(--syn-text-muted)] focus:outline-none focus:border-[var(--syn-border-focus)] focus:ring-1 focus:ring-[var(--syn-border-focus)] transition-colors",
 
+	/**
+	 * 節點表單裡的**緊湊版**輸入框。
+	 *
+	 * 只給顏色與焦點態，尺寸（padding / text size / width）由呼叫端決定 ——
+	 * 節點表單的欄位寬度是逐個調的（有的要 flex-1，有的固定），
+	 * 硬塞一個尺寸進去只會被覆蓋，而 Tailwind 的覆蓋順序取決於 CSS 產生順序，
+	 * 不是 class 的書寫順序 —— 那是「有時候有效」的來源。
+	 */
+	inputSm:
+		"rounded border border-[var(--syn-border)] bg-[var(--syn-bg-input)] text-[var(--syn-text-primary)] font-mono placeholder:text-[var(--syn-text-muted)] focus:outline-none focus:border-[var(--syn-border-focus)] transition-colors",
+
+	/** 可選取的小標籤（chip）：未選取 */
+	chip:
+		"rounded border border-[var(--syn-border)] bg-[var(--syn-bg-card)] text-[var(--syn-text-secondary)] opacity-70 hover:opacity-100 transition-colors",
+	/** 可選取的小標籤：已選取。用 accent 而不是第四個顏色 —— */
+	/** 顏色愈少，「選中」愈明顯。 */
+	chipOn:
+		"rounded border border-[var(--syn-accent)] bg-[var(--syn-accent-soft)] text-[var(--syn-accent-soft-text)] transition-colors",
+
 	/** 分隔線 */
 	divider: "border-t border-[var(--syn-border)]",
 } as const;

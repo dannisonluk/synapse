@@ -45,7 +45,7 @@ export const VizChartNode: React.FC<
 	NodeProps<Node<VizChartNodeData>>
 > = ({ id, data, selected }) => {
 	// 語意布林由 context 提供，元件不再自己拿 mode 字串比較
-	const { isLight, tokens } = useTheme();
+	const { tokens } = useTheme();
 
 	const [chartData, setChartData] = useState<any[]>([]);
 	const [loading, setLoading] = useState(false);
@@ -128,18 +128,16 @@ export const VizChartNode: React.FC<
 		)} Z`;
 	};
 
-	const inputBorder = isLight ? "#D6C7B2" : "#30363D";
-	const inputBg = isLight ? "#FFFFFF" : "#0D1117";
+	const inputBorder = "var(--syn-border-hover)";
+	const inputBg = "var(--syn-bg-card)";
 
 	return (
 		<div
 			style={{
-				backgroundColor: isLight ? "#FFFFFF" : "#161B22",
+				backgroundColor: "var(--syn-bg-panel)",
 				borderColor: selected
 					? tokens.accent
-					: isLight
-						? "#E7DFD5"
-						: "#30363D",
+					: "var(--syn-border)",
 				boxShadow: selected
 					? `0 0 0 2px ${tokens.accent}33`
 					: "0 4px 12px rgba(0,0,0,0.05)",
@@ -153,21 +151,19 @@ export const VizChartNode: React.FC<
 					top: "50%",
 					backgroundColor: "#A371F7",
 				}}
-				className="w-2.5 h-2.5 border-2 border-white dark:border-slate-900 -left-1.5 -translate-y-1/2"
+				className="w-2.5 h-2.5 border-2 border-[var(--syn-bg-card)] -left-1.5 -translate-y-1/2"
 			/>
 
 			{/* Header */}
 			<div
 				className={`flex items-center justify-between pb-2 border-b ${
-					isLight ? "border-stone-100" : "border-gray-800"
+					"border-[var(--syn-border)]"
 				}`}
 			>
 				<div className="flex items-center space-x-2">
 					<div
 						className={`p-1 rounded ${
-							isLight
-								? "bg-purple-50 text-purple-600"
-								: "bg-purple-950 text-purple-400"
+							"bg-[var(--syn-accent-soft)] text-[var(--syn-accent-soft-text)]"
 						}`}
 					>
 						<PieChart className="w-3.5 h-3.5" />
@@ -175,14 +171,14 @@ export const VizChartNode: React.FC<
 					<div>
 						<div
 							className={`font-semibold ${
-								isLight ? "text-stone-800" : "text-slate-100"
+								"text-[var(--syn-text-primary)]"
 							}`}
 						>
 							{data.label || "BI Chart"}
 						</div>
 						<div
 							className={`text-[9px] font-mono ${
-								isLight ? "text-stone-400" : "text-slate-500"
+								"text-[var(--syn-text-secondary)]"
 							}`}
 						>
 							VIZ_CHART
@@ -192,9 +188,7 @@ export const VizChartNode: React.FC<
 				<button
 					onClick={renderChart}
 					className={`p-1 rounded ${
-						isLight
-							? "hover:bg-stone-100 text-stone-400"
-							: "hover:bg-slate-800 text-slate-500"
+						"hover:bg-[var(--syn-bg-hover)] text-[var(--syn-text-secondary)]"
 					}`}
 				>
 					<RefreshCw
@@ -216,12 +210,8 @@ export const VizChartNode: React.FC<
 								title={t}
 								className={`flex-1 flex items-center justify-center p-1 rounded border text-[9px] font-bold ${
 									chartType === t
-										? isLight
-											? "bg-purple-50 text-purple-700 border-purple-300"
-											: "bg-purple-950 text-purple-300 border-purple-700"
-										: isLight
-											? "bg-white text-stone-400 border-stone-200"
-											: "bg-slate-950 text-slate-500 border-slate-800"
+										? "bg-[var(--syn-accent-soft)] text-[var(--syn-accent-soft-text)] border-[var(--syn-accent)]"
+										: "bg-[var(--syn-bg-input)] text-[var(--syn-text-muted)] border-[var(--syn-border)]"
 								}`}
 							>
 								{t === "BAR" && (
@@ -288,7 +278,7 @@ export const VizChartNode: React.FC<
 				{/* 圖表渲染區 */}
 				<div
 					style={{
-						backgroundColor: isLight ? "#FDFBF7" : "#0D1117",
+						backgroundColor: "var(--syn-bg-canvas)",
 						borderColor: tokens.border,
 					}}
 					className="rounded border p-2"
@@ -304,9 +294,7 @@ export const VizChartNode: React.FC<
 								</div>
 								<div
 									className={`text-[10px] font-mono mt-1 ${
-										isLight
-											? "text-stone-500"
-											: "text-slate-500"
+										"text-[var(--syn-text-muted)]"
 									}`}
 								>
 									{yAxis} (top row)
@@ -342,7 +330,7 @@ export const VizChartNode: React.FC<
 												]
 											}
 											stroke={
-												isLight ? "#FFFFFF" : "#0D1117"
+												"var(--syn-bg-card)"
 											}
 											strokeWidth="1"
 										/>
@@ -350,7 +338,7 @@ export const VizChartNode: React.FC<
 								})}
 								<g
 									fontSize="6"
-									fill={isLight ? "#292524" : "#8B949E"}
+									fill={"var(--syn-text-primary)"}
 								>
 									{labels.slice(0, 5).map((label, i) => (
 										<text
@@ -407,9 +395,7 @@ export const VizChartNode: React.FC<
 														fontSize="6"
 														textAnchor="middle"
 														fill={
-															isLight
-																? "#78716C"
-																: "#8B949E"
+															"var(--syn-text-secondary)"
 														}
 													>
 														{String(
@@ -469,7 +455,7 @@ export const VizChartNode: React.FC<
 					) : (
 						<div
 							className={`text-center py-4 text-[10px] ${
-								isLight ? "text-stone-400" : "text-slate-500"
+								"text-[var(--syn-text-secondary)]"
 							}`}
 						>
 							{loading

@@ -1,6 +1,18 @@
 /** @type {import('tailwindcss').Config} */
 module.exports = {
 	content: ["./index.html", "./src/**/*.{js,ts,jsx,tsx}"],
+	/**
+	 * `dark:` variant 綁到 `data-theme="dark"`，而不是 Tailwind 的預設（media）。
+	 *
+	 * 為什麼一定要設：預設值 `media` 讓 `dark:` 跟隨**作業系統**，而不是我們的
+	 * 主題切換。於是「OS 是深色、使用者手動選淺色」時，`dark:` 的樣式仍然生效 ——
+	 * 一個只看 OS 不看使用者的不一致，而且很難查（在切換主題的開發者機器上
+	 * 完全看不出來）。
+	 *
+	 * ThemeContext 已經在 root 設 `data-theme`，所以這裡直接綁它，
+	 * 不需要再另外加一個 `dark` class（兩份狀態會不同步）。
+	 */
+	darkMode: ["class", '[data-theme="dark"]'],
 	theme: {
 		extend: {
 			// 顏色一律走 theme/tokens.ts 產生的 CSS 自訂屬性（`--syn-*`），

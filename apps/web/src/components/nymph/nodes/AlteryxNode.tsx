@@ -24,6 +24,7 @@ import {
 	suggestJoinKeys,
 	isConfidentSuggestion,
 } from "../../../engine/suggest";
+import { ui, TYPE } from "../../../theme/ui";
 import {
 	qi,
 	hasCurrentField,
@@ -324,7 +325,7 @@ export const AlteryxNode: React.FC<NodeProps<Node<AlteryxNodeData>>> = ({
 	data,
 	selected,
 }) => {
-	const { isLight, tokens } = useTheme();
+	const { tokens } = useTheme();
 	const nodeType = data.type || "FILTER";
 	const [showSqlPreview, setShowSqlPreview] = useState(false);
 	const [config, setConfig] = useState<AlteryxNodeConfig>(data.config || {});
@@ -514,48 +515,35 @@ export const AlteryxNode: React.FC<NodeProps<Node<AlteryxNodeData>>> = ({
 	};
 
 	// --- 擴充節點共用的樣式與小工具 -------------------------------------
-	// 這幾個 class 在新增的 11 種節點裡重複出現，抽出來免得每塊各寫一份、
-	// 改配色時漏掉其中幾塊。必須放在 isLight 之後 —— 它們在宣告時就要求值。
+	// 顏色一律來自 theme/ui.ts（底層是 `--syn-*` CSS 變數），所以**不再判斷主題**。
+	// 這幾個常數以前各寫一份 isLight 分支，而它們被幾十處引用 ——
+	// 等於配色散在整個檔案裡。改成 token 之後，改一次所有使用點都跟著對。
 
 	/** 卡片式表單區塊的外框 */
-	const boxCls = `p-2 rounded border space-y-1 ${
-		isLight
-			? "bg-stone-50/80 border-stone-200/60"
-			: "bg-slate-900/60 border-slate-800"
-	}`;
+	const boxCls = `p-2 rounded border space-y-1 ${ui.subtle} ${ui.border}`;
 
 	/** 區塊標題 */
-	const titleCls =
-		"text-[9px] font-bold font-mono tracking-wider opacity-60 uppercase";
+	const titleCls = TYPE.label;
 
-	/** 說明文字 */
-	const hintCls = "text-[9px] font-mono opacity-50";
+	/** 說明文字。用 token 而不是 opacity —— 半透明會與底色相乘， */
+	/** 在有色底上結果不可預測。 */
+	const hintCls = `${TYPE.caption} ${ui.textMuted}`;
 
 	/** 一般文字輸入框 */
-	const inputCls = `px-1.5 py-0.5 rounded border text-[11px] font-mono ${
-		isLight
-			? "bg-white border-stone-200 text-stone-800"
-			: "bg-slate-950 border-slate-800 text-slate-200"
-	}`;
+	const inputCls = `px-1.5 py-0.5 text-[11px] ${ui.inputSm}`;
 
 	/** 下拉選單 */
-	const selectCls = `px-1 py-0.5 rounded border text-[11px] font-mono ${
-		isLight
-			? "bg-white border-stone-200 text-stone-800"
-			: "bg-slate-950 border-slate-800 text-slate-200"
-	}`;
+	const selectCls = `px-1 py-0.5 text-[11px] ${ui.inputSm}`;
 
-	/** schema chip（選取中 / 未選取） */
+	/**
+	 * schema chip（選取中 / 未選取）。
+	 *
+	 * 選取中原本用 cyan —— 那會是介面上的第四個色相（主題已經有 accent 與
+	 * 三個語意色）。而 chip 的「選中」語意上就是選取，該用 accent。
+	 * 顏色愈少，選中的狀態愈明顯。
+	 */
 	const chipCls = (active: boolean) =>
-		`px-1.5 py-0.5 rounded border text-[9px] font-mono transition-colors ${
-			active
-				? isLight
-					? "bg-cyan-100 border-cyan-300 text-cyan-800"
-					: "bg-cyan-900/40 border-cyan-700 text-cyan-300"
-				: isLight
-					? "bg-white border-stone-200 opacity-70 hover:opacity-100"
-					: "bg-slate-950 border-slate-800 opacity-70 hover:opacity-100"
-		}`;
+		`px-1.5 py-0.5 text-[9px] font-mono ${active ? ui.chipOn : ui.chip}`;
 
 	/** 通用：寫回某個 string[] 欄位（UNIQUE/IMPUTE/… 的 columns、partitionBy） */
 	const setNameList = (
@@ -574,12 +562,10 @@ export const AlteryxNode: React.FC<NodeProps<Node<AlteryxNodeData>>> = ({
 	return (
 		<div
 			style={{
-				backgroundColor: isLight ? "#FFFFFF" : "#161B22",
+				backgroundColor: "var(--syn-bg-card)",
 				borderColor: selected
 					? tokens.accent
-					: isLight
-						? "#E7DFD5"
-						: "#30363D",
+					: "var(--syn-border)",
 				boxShadow: selected
 					? `0 0 0 2px ${tokens.accent}33`
 					: "0 4px 12px rgba(0,0,0,0.05)",
@@ -597,7 +583,7 @@ export const AlteryxNode: React.FC<NodeProps<Node<AlteryxNodeData>>> = ({
 						id="left"
 						position={Position.Left}
 						style={{ top: "30%", backgroundColor: tokens.accent }}
-						className="w-2.5 h-2.5 border-2 border-white dark:border-slate-900 -left-1.5"
+						className="w-2.5 h-2.5 border-2 border-[var(--syn-bg-card)] -left-1.5"
 					/>
 					<span className="absolute left-2 top-[70%] -translate-y-1/2 text-[9px] font-mono font-bold opacity-60">
 						R
@@ -607,7 +593,7 @@ export const AlteryxNode: React.FC<NodeProps<Node<AlteryxNodeData>>> = ({
 						id="right"
 						position={Position.Left}
 						style={{ top: "70%", backgroundColor: tokens.accent }}
-						className="w-2.5 h-2.5 border-2 border-white dark:border-slate-900 -left-1.5"
+						className="w-2.5 h-2.5 border-2 border-[var(--syn-bg-card)] -left-1.5"
 					/>
 				</>
 			) : (
@@ -616,24 +602,22 @@ export const AlteryxNode: React.FC<NodeProps<Node<AlteryxNodeData>>> = ({
 					position={Position.Left}
 					style={{
 						top: "50%",
-						backgroundColor: isLight ? "#78716C" : "#8B949E",
+						backgroundColor: "var(--syn-text-secondary)",
 					}}
-					className="w-2.5 h-2.5 border-2 border-white dark:border-slate-900 -left-1.5 -translate-y-1/2"
+					className="w-2.5 h-2.5 border-2 border-[var(--syn-bg-card)] -left-1.5 -translate-y-1/2"
 				/>
 			)}
 
 			{/* 頂部 Header */}
 			<div
 				className={`flex items-center justify-between pb-2 border-b ${
-					isLight ? "border-stone-100" : "border-gray-800"
+					"border-[var(--syn-border)]"
 				}`}
 			>
 				<div className="flex items-center space-x-2">
 					<div
 						className={`p-1 rounded ${
-							isLight
-								? "bg-stone-100 text-stone-700"
-								: "bg-slate-800 text-slate-300"
+							"bg-[var(--syn-bg-active)] text-[var(--syn-text-primary)]"
 						}`}
 					>
 						{nodeType === "INPUT_DUCKDB" && (
@@ -670,14 +654,14 @@ export const AlteryxNode: React.FC<NodeProps<Node<AlteryxNodeData>>> = ({
 					<div>
 						<div
 							className={`font-semibold ${
-								isLight ? "text-stone-800" : "text-slate-100"
+								"text-[var(--syn-text-primary)]"
 							}`}
 						>
 							{data.label || nodeType}
 						</div>
 						<div
 							className={`text-[9px] font-mono ${
-								isLight ? "text-stone-400" : "text-slate-500"
+								"text-[var(--syn-text-secondary)]"
 							}`}
 						>
 							{nodeType}
@@ -688,9 +672,7 @@ export const AlteryxNode: React.FC<NodeProps<Node<AlteryxNodeData>>> = ({
 					onClick={() => setShowSqlPreview(!showSqlPreview)}
 					title="顯示這個節點編譯出來的 SQL"
 					className={`p-1 rounded ${
-						isLight
-							? "hover:bg-stone-100 text-stone-400"
-							: "hover:bg-slate-800 text-slate-500"
+						"hover:bg-[var(--syn-bg-hover)] text-[var(--syn-text-secondary)]"
 					}`}
 				>
 					<Code className="w-3.5 h-3.5" />
@@ -704,9 +686,7 @@ export const AlteryxNode: React.FC<NodeProps<Node<AlteryxNodeData>>> = ({
 					}}
 					title="顯示執行計畫（EXPLAIN）。只做顯示不做解析 —— plan 的文字格式會隨版本改變。"
 					className={`p-1 rounded ${
-						isLight
-							? "hover:bg-stone-100 text-stone-400"
-							: "hover:bg-slate-800 text-slate-500"
+						"hover:bg-[var(--syn-bg-hover)] text-[var(--syn-text-secondary)]"
 					}`}
 				>
 					<Gauge className="w-3.5 h-3.5" />
@@ -730,9 +710,7 @@ export const AlteryxNode: React.FC<NodeProps<Node<AlteryxNodeData>>> = ({
 								if (file) handleFileUpload(file);
 							}}
 							className={`p-2.5 border-2 border-dashed rounded-lg text-center cursor-pointer transition-all ${
-								isLight
-									? "border-stone-300 hover:border-amber-500 bg-stone-50"
-									: "border-slate-800 hover:border-cyan-500 bg-slate-950"
+								"border-[var(--syn-border)] hover:border-[var(--syn-accent)] bg-[var(--syn-bg-card)]"
 							}`}
 						>
 							<input
@@ -776,9 +754,7 @@ export const AlteryxNode: React.FC<NodeProps<Node<AlteryxNodeData>>> = ({
 										<thead>
 											<tr
 												className={
-													isLight
-														? "bg-stone-100 text-stone-700"
-														: "bg-slate-900 text-slate-300"
+													"bg-[var(--syn-bg-active)] text-[var(--syn-text-primary)]"
 												}
 											>
 												{Object.keys(previewRows[0])
@@ -828,11 +804,7 @@ export const AlteryxNode: React.FC<NodeProps<Node<AlteryxNodeData>>> = ({
 				{/* 2. FILTER 節點介面 */}
 				{nodeType === "FILTER" && (
 					<div
-						className={`p-2 rounded border space-y-1 ${
-							isLight
-								? "bg-stone-50/80 border-stone-200/60"
-								: "bg-slate-900/60 border-slate-800"
-						}`}
+						className={`p-2 rounded border space-y-1 ${ui.subtle} ${ui.border}`}
 					>
 						<div className="text-[9px] font-bold font-mono tracking-wider opacity-60 uppercase">
 							Filter Condition
@@ -844,11 +816,7 @@ export const AlteryxNode: React.FC<NodeProps<Node<AlteryxNodeData>>> = ({
 								value={config.field || "amount"}
 								onValueChange={(v) => updateConfig("field", v)}
 								placeholder="Field"
-								className={`w-20 px-1.5 py-0.5 rounded border text-[11px] font-mono ${
-									isLight
-										? "bg-white border-stone-200 text-stone-800"
-										: "bg-slate-950 border-slate-800 text-slate-200"
-								}`}
+								className={`w-20 px-1.5 py-0.5 rounded border text-[11px] font-mono ${ui.inputSm}`}
 							/>
 							<select
 								value={config.op || ">"}
@@ -856,9 +824,7 @@ export const AlteryxNode: React.FC<NodeProps<Node<AlteryxNodeData>>> = ({
 									updateConfig("op", e.target.value)
 								}
 								className={`px-1 rounded border text-[11px] font-mono ${
-									isLight
-										? "bg-white border-stone-200 text-amber-700"
-										: "bg-slate-950 border-slate-800 text-cyan-400"
+									"bg-[var(--syn-bg-input)] border-[var(--syn-border)] text-[var(--syn-warning)]"
 								}`}
 							>
 								<option value="=">=</option>
@@ -871,11 +837,7 @@ export const AlteryxNode: React.FC<NodeProps<Node<AlteryxNodeData>>> = ({
 									updateConfig("val", e.target.value)
 								}
 								placeholder="Value"
-								className={`flex-1 px-1.5 py-0.5 rounded border text-[11px] font-mono ${
-									isLight
-										? "bg-white border-stone-200 text-stone-800"
-										: "bg-slate-950 border-slate-800 text-slate-200"
-								}`}
+								className={`flex-1 px-1.5 py-0.5 rounded border text-[11px] font-mono ${ui.inputSm}`}
 							/>
 						</div>
 						<MissingFieldWarning
@@ -888,11 +850,7 @@ export const AlteryxNode: React.FC<NodeProps<Node<AlteryxNodeData>>> = ({
 				{/* 3. FORMULA 節點介面 */}
 				{nodeType === "FORMULA" && (
 					<div
-						className={`p-2 rounded border space-y-1 ${
-							isLight
-								? "bg-stone-50/80 border-stone-200/60"
-								: "bg-slate-900/60 border-slate-800"
-						}`}
+						className={`p-2 rounded border space-y-1 ${ui.subtle} ${ui.border}`}
 					>
 						<div className="text-[9px] font-bold font-mono tracking-wider opacity-60 uppercase">
 							New Column Formula
@@ -904,11 +862,7 @@ export const AlteryxNode: React.FC<NodeProps<Node<AlteryxNodeData>>> = ({
 									updateConfig("outputColumn", e.target.value)
 								}
 								placeholder="Output Column Name"
-								className={`w-full px-1.5 py-0.5 rounded border text-[11px] font-mono ${
-									isLight
-										? "bg-white border-stone-200 text-stone-800"
-										: "bg-slate-950 border-slate-800 text-slate-200"
-								}`}
+								className={`w-full px-1.5 py-0.5 rounded border text-[11px] font-mono ${ui.inputSm}`}
 							/>
 							<input
 								value={config.expression || "amount * 1.1"}
@@ -917,9 +871,7 @@ export const AlteryxNode: React.FC<NodeProps<Node<AlteryxNodeData>>> = ({
 								}
 								placeholder="Expression (e.g. amount * 1.1)"
 								className={`w-full px-1.5 py-0.5 rounded border text-[11px] font-mono ${
-									isLight
-										? "bg-white border-stone-200 text-amber-700"
-										: "bg-slate-950 border-slate-800 text-cyan-400"
+									"bg-[var(--syn-bg-input)] border-[var(--syn-border)] text-[var(--syn-warning)]"
 								}`}
 							/>
 						</div>
@@ -929,11 +881,7 @@ export const AlteryxNode: React.FC<NodeProps<Node<AlteryxNodeData>>> = ({
 				{/* 4. SUMMARIZE 節點介面（多分組鍵 + 多聚合） */}
 				{nodeType === "SUMMARIZE" && (
 					<div
-						className={`p-2 rounded border space-y-2 ${
-							isLight
-								? "bg-stone-50/80 border-stone-200/60"
-								: "bg-slate-900/60 border-slate-800"
-						}`}
+						className={`p-2 rounded border space-y-2 ${ui.subtle} ${ui.border}`}
 					>
 						{/* 分組鍵 */}
 						<div className="space-y-1">
@@ -953,9 +901,7 @@ export const AlteryxNode: React.FC<NodeProps<Node<AlteryxNodeData>>> = ({
 										}}
 										placeholder="Group Key"
 										className={`flex-1 px-1.5 py-0.5 rounded border text-[11px] font-mono ${
-											isLight
-												? "bg-white border-stone-200 text-stone-800"
-												: "bg-slate-950 border-slate-800 text-slate-200"
+											"bg-[var(--syn-bg-input)] border-[var(--syn-border)] text-[var(--syn-text-primary)]"
 										}`}
 									/>
 									<button
@@ -1019,9 +965,7 @@ export const AlteryxNode: React.FC<NodeProps<Node<AlteryxNodeData>>> = ({
 											});
 										}}
 										className={`px-1 rounded border text-[11px] font-mono ${
-											isLight
-												? "bg-white border-stone-200 text-amber-700"
-												: "bg-slate-950 border-slate-800 text-cyan-400"
+							"bg-[var(--syn-bg-input)] border-[var(--syn-border)] text-[var(--syn-warning)]"
 										}`}
 									>
 										{AGG_FUNCS.map((f) => (
@@ -1043,9 +987,7 @@ export const AlteryxNode: React.FC<NodeProps<Node<AlteryxNodeData>>> = ({
 										}}
 										placeholder="Target（* = COUNT(*)）"
 										className={`flex-1 px-1.5 py-0.5 rounded border text-[11px] font-mono ${
-											isLight
-												? "bg-white border-stone-200 text-stone-800"
-												: "bg-slate-950 border-slate-800 text-slate-200"
+											"bg-[var(--syn-bg-input)] border-[var(--syn-border)] text-[var(--syn-text-primary)]"
 										}`}
 									/>
 									<button
@@ -1100,11 +1042,7 @@ export const AlteryxNode: React.FC<NodeProps<Node<AlteryxNodeData>>> = ({
 				{/* 5. JOIN 節點介面 */}
 				{nodeType === "JOIN" && (
 					<div
-						className={`p-2 rounded border space-y-1 ${
-							isLight
-								? "bg-stone-50/80 border-stone-200/60"
-								: "bg-slate-900/60 border-slate-800"
-						}`}
+						className={`p-2 rounded border space-y-1 ${ui.subtle} ${ui.border}`}
 					>
 						<div className="text-[9px] font-bold font-mono tracking-wider opacity-60 uppercase">
 							Join Keys
@@ -1116,11 +1054,7 @@ export const AlteryxNode: React.FC<NodeProps<Node<AlteryxNodeData>>> = ({
 								value={config.leftKey || "id"}
 								onValueChange={(v) => updateConfig("leftKey", v)}
 								placeholder="Left Key"
-								className={`w-full px-1.5 py-0.5 rounded border text-[11px] font-mono ${
-									isLight
-										? "bg-white border-stone-200 text-stone-800"
-										: "bg-slate-950 border-slate-800 text-slate-200"
-								}`}
+								className={`w-full px-1.5 py-0.5 rounded border text-[11px] font-mono ${ui.inputSm}`}
 							/>
 							<select
 								value={config.joinType || "INNER"}
@@ -1128,9 +1062,7 @@ export const AlteryxNode: React.FC<NodeProps<Node<AlteryxNodeData>>> = ({
 									updateConfig("joinType", e.target.value)
 								}
 								className={`px-1 rounded border text-[11px] font-mono ${
-									isLight
-										? "bg-white border-stone-200 text-amber-700"
-										: "bg-slate-950 border-slate-800 text-cyan-400"
+									"bg-[var(--syn-bg-input)] border-[var(--syn-border)] text-[var(--syn-warning)]"
 								}`}
 							>
 								<option value="INNER">INNER</option>
@@ -1145,11 +1077,7 @@ export const AlteryxNode: React.FC<NodeProps<Node<AlteryxNodeData>>> = ({
 									updateConfig("rightKey", v)
 								}
 								placeholder="Right Key"
-								className={`w-full px-1.5 py-0.5 rounded border text-[11px] font-mono ${
-									isLight
-										? "bg-white border-stone-200 text-stone-800"
-										: "bg-slate-950 border-slate-800 text-slate-200"
-								}`}
+								className={`w-full px-1.5 py-0.5 rounded border text-[11px] font-mono ${ui.inputSm}`}
 							/>
 						</div>
 						<div className="flex justify-between gap-1">
@@ -1195,8 +1123,8 @@ export const AlteryxNode: React.FC<NodeProps<Node<AlteryxNodeData>>> = ({
 									title={`依據：${top.reason}`}
 									className={`text-[9px] font-mono leading-tight text-left hover:underline ${
 										confident
-											? "text-emerald-600 dark:text-emerald-400"
-											: "text-amber-600 dark:text-amber-400"
+											? "text-[var(--syn-success)]"
+											: "text-[var(--syn-warning)]"
 									}`}
 								>
 									{confident ? "建議鍵" : "可能是"}：{top.left} ={" "}
@@ -1224,9 +1152,7 @@ export const AlteryxNode: React.FC<NodeProps<Node<AlteryxNodeData>>> = ({
 					return (
 						<div
 							className={`p-2 rounded border space-y-1 ${
-								isLight
-									? "bg-stone-50/80 border-stone-200/60"
-									: "bg-slate-900/60 border-slate-800"
+								"bg-[var(--syn-bg-panel)] border-[var(--syn-border)]"
 							}`}
 						>
 							<div className="text-[9px] font-bold font-mono tracking-wider opacity-60 uppercase">
@@ -1292,8 +1218,8 @@ export const AlteryxNode: React.FC<NodeProps<Node<AlteryxNodeData>>> = ({
 										title={`依據：${top.reason}。名稱相同不代表內容對得上 —— 模糊比對的價值就在拼字不同，記得確認門檻。`}
 										className={`text-[9px] font-mono leading-tight text-left hover:underline ${
 											confident
-												? "text-emerald-600 dark:text-emerald-400"
-												: "text-amber-600 dark:text-amber-400"
+												? "text-[var(--syn-success)]"
+												: "text-[var(--syn-warning)]"
 										}`}
 									>
 										{confident ? "建議鍵" : "可能是"}：{top.left} ={" "}
@@ -1466,9 +1392,7 @@ export const AlteryxNode: React.FC<NodeProps<Node<AlteryxNodeData>>> = ({
 					return (
 						<div
 							className={`p-2 rounded border space-y-1 ${
-								isLight
-									? "bg-stone-50/80 border-stone-200/60"
-									: "bg-slate-900/60 border-slate-800"
+								"bg-[var(--syn-bg-panel)] border-[var(--syn-border)]"
 							}`}
 						>
 							<div className="text-[9px] font-bold font-mono tracking-wider opacity-60 uppercase">
@@ -1614,9 +1538,7 @@ export const AlteryxNode: React.FC<NodeProps<Node<AlteryxNodeData>>> = ({
 					return (
 						<div
 							className={`p-2 rounded border space-y-1 ${
-								isLight
-									? "bg-stone-50/80 border-stone-200/60"
-									: "bg-slate-900/60 border-slate-800"
+								"bg-[var(--syn-bg-panel)] border-[var(--syn-border)]"
 							}`}
 						>
 							<div className="text-[9px] font-bold font-mono tracking-wider opacity-60 uppercase">
@@ -1648,9 +1570,7 @@ export const AlteryxNode: React.FC<NodeProps<Node<AlteryxNodeData>>> = ({
 								format={config.outputFormat}
 								columns={upstream.byTable[0] || []}
 								className={`w-full py-1 rounded border text-[10px] font-mono ${
-									isLight
-										? "bg-amber-50 border-amber-300 text-amber-700 hover:bg-amber-100"
-										: "bg-amber-500/10 border-amber-500/40 text-amber-400 hover:bg-amber-500/20"
+									"bg-[var(--syn-warning-soft)] border-[var(--syn-warning)] text-[var(--syn-warning)]"
 								} disabled:opacity-40`}
 							/>
 
@@ -1687,9 +1607,7 @@ export const AlteryxNode: React.FC<NodeProps<Node<AlteryxNodeData>>> = ({
 					return (
 						<div
 							className={`p-2 rounded border space-y-1 ${
-								isLight
-									? "bg-stone-50/80 border-stone-200/60"
-									: "bg-slate-900/60 border-slate-800"
+								"bg-[var(--syn-bg-panel)] border-[var(--syn-border)]"
 							}`}
 						>
 							<div className="text-[9px] font-bold font-mono tracking-wider opacity-60 uppercase">
@@ -1791,11 +1709,7 @@ export const AlteryxNode: React.FC<NodeProps<Node<AlteryxNodeData>>> = ({
 				{/* 6. SORT 節點介面 */}
 				{nodeType === "SORT" && (
 					<div
-						className={`p-2 rounded border space-y-1 ${
-							isLight
-								? "bg-stone-50/80 border-stone-200/60"
-								: "bg-slate-900/60 border-slate-800"
-						}`}
+						className={`p-2 rounded border space-y-1 ${ui.subtle} ${ui.border}`}
 					>
 						<div className="text-[9px] font-bold font-mono tracking-wider opacity-60 uppercase">
 							Sort Order
@@ -1807,9 +1721,7 @@ export const AlteryxNode: React.FC<NodeProps<Node<AlteryxNodeData>>> = ({
 							onValueChange={(v) => updateConfig("field", v)}
 							placeholder="Sort By (e.g. amount)"
 							className={`w-full px-1.5 py-0.5 rounded border text-[11px] font-mono ${
-								isLight
-									? "bg-white border-stone-200 text-stone-800"
-									: "bg-slate-950 border-slate-800 text-slate-200"
+								"bg-[var(--syn-bg-input)] border-[var(--syn-border)] text-[var(--syn-text-primary)]"
 							}`}
 						/>
 						<MissingFieldWarning
@@ -1835,11 +1747,7 @@ export const AlteryxNode: React.FC<NodeProps<Node<AlteryxNodeData>>> = ({
 				{/* 7. SELECT 節點介面 */}
 				{nodeType === "SELECT" && (
 					<div
-						className={`p-2 rounded border space-y-1 ${
-							isLight
-								? "bg-stone-50/80 border-stone-200/60"
-								: "bg-slate-900/60 border-slate-800"
-						}`}
+						className={`p-2 rounded border space-y-1 ${ui.subtle} ${ui.border}`}
 					>
 						<div className="text-[9px] font-bold font-mono tracking-wider opacity-60 uppercase">
 							Column Selection
@@ -1849,9 +1757,7 @@ export const AlteryxNode: React.FC<NodeProps<Node<AlteryxNodeData>>> = ({
 							onChange={(e) => updateColumns(e.target.value)}
 							placeholder="id, name, amount"
 							className={`w-full px-1.5 py-0.5 rounded border text-[11px] font-mono ${
-								isLight
-									? "bg-white border-stone-200 text-stone-800"
-									: "bg-slate-950 border-slate-800 text-slate-200"
+								"bg-[var(--syn-bg-input)] border-[var(--syn-border)] text-[var(--syn-text-primary)]"
 							}`}
 						/>
 						{/* 上游 schema 已知時，點 chip 就能加入 / 移除（仍保留上面的自由輸入） */}
@@ -1869,12 +1775,8 @@ export const AlteryxNode: React.FC<NodeProps<Node<AlteryxNodeData>>> = ({
 											onClick={() => toggleColumn(c.name)}
 											className={`px-1.5 py-0.5 rounded border text-[9px] font-mono transition-colors ${
 												picked
-													? isLight
-														? "bg-amber-100 border-amber-300 text-amber-800"
-														: "bg-cyan-950 border-cyan-800 text-cyan-300"
-													: isLight
-														? "bg-white border-stone-200 text-stone-500 hover:border-stone-300"
-														: "bg-slate-950 border-slate-800 text-slate-500 hover:border-slate-700"
+													? "bg-[var(--syn-warning-soft)] border-[var(--syn-warning)] text-[var(--syn-warning)]"
+													: "bg-[var(--syn-bg-input)] border-[var(--syn-border)] text-[var(--syn-text-secondary)] hover:border-[var(--syn-border-hover)]"
 											}`}
 										>
 											{c.name}
@@ -1894,11 +1796,7 @@ export const AlteryxNode: React.FC<NodeProps<Node<AlteryxNodeData>>> = ({
 				{/* 8. UNION 節點介面（N 路合併） */}
 				{nodeType === "UNION" && (
 					<div
-						className={`p-2 rounded border space-y-1 ${
-							isLight
-								? "bg-stone-50/80 border-stone-200/60"
-								: "bg-slate-900/60 border-slate-800"
-						}`}
+						className={`p-2 rounded border space-y-1 ${ui.subtle} ${ui.border}`}
 					>
 						<div className="text-[9px] font-bold font-mono tracking-wider opacity-60 uppercase">
 							Union Mode
@@ -1909,9 +1807,7 @@ export const AlteryxNode: React.FC<NodeProps<Node<AlteryxNodeData>>> = ({
 								updateConfig("unionMode", e.target.value)
 							}
 							className={`w-full px-1 py-0.5 rounded border text-[11px] font-mono ${
-								isLight
-									? "bg-white border-stone-200 text-fuchsia-700"
-									: "bg-slate-950 border-slate-800 text-fuchsia-400"
+								"bg-[var(--syn-bg-input)] border-[var(--syn-border)] text-[var(--syn-accent)]"
 							}`}
 						>
 							<option value="BY_NAME">
@@ -1940,11 +1836,7 @@ export const AlteryxNode: React.FC<NodeProps<Node<AlteryxNodeData>>> = ({
 				{/* 9. SAMPLE 節點介面 */}
 				{nodeType === "SAMPLE" && (
 					<div
-						className={`p-2 rounded border space-y-1 ${
-							isLight
-								? "bg-stone-50/80 border-stone-200/60"
-								: "bg-slate-900/60 border-slate-800"
-						}`}
+						className={`p-2 rounded border space-y-1 ${ui.subtle} ${ui.border}`}
 					>
 						<div className="text-[9px] font-bold font-mono tracking-wider opacity-60 uppercase">
 							Sample
@@ -1956,9 +1848,7 @@ export const AlteryxNode: React.FC<NodeProps<Node<AlteryxNodeData>>> = ({
 									updateConfig("sampleMode", e.target.value)
 								}
 								className={`px-1 rounded border text-[11px] font-mono ${
-									isLight
-										? "bg-white border-stone-200 text-orange-700"
-										: "bg-slate-950 border-slate-800 text-orange-400"
+									"bg-[var(--syn-bg-input)] border-[var(--syn-border)] text-[var(--syn-accent)]"
 								}`}
 							>
 								<option value="FIRST">FIRST（前 N 列）</option>
@@ -1980,11 +1870,7 @@ export const AlteryxNode: React.FC<NodeProps<Node<AlteryxNodeData>>> = ({
 										),
 									})
 								}
-								className={`w-20 px-1.5 py-0.5 rounded border text-[11px] font-mono ${
-									isLight
-										? "bg-white border-stone-200 text-stone-800"
-										: "bg-slate-950 border-slate-800 text-slate-200"
-								}`}
+								className={`w-20 px-1.5 py-0.5 rounded border text-[11px] font-mono ${ui.inputSm}`}
 							/>
 							<span className="self-center text-[9px] font-mono opacity-50">
 								rows
@@ -2001,11 +1887,7 @@ export const AlteryxNode: React.FC<NodeProps<Node<AlteryxNodeData>>> = ({
 				{/* 10. RENAME 節點介面 */}
 				{nodeType === "RENAME" && (
 					<div
-						className={`p-2 rounded border space-y-1 ${
-							isLight
-								? "bg-stone-50/80 border-stone-200/60"
-								: "bg-slate-900/60 border-slate-800"
-						}`}
+						className={`p-2 rounded border space-y-1 ${ui.subtle} ${ui.border}`}
 					>
 						<div className="text-[9px] font-bold font-mono tracking-wider opacity-60 uppercase">
 							Rename Columns
@@ -2023,9 +1905,7 @@ export const AlteryxNode: React.FC<NodeProps<Node<AlteryxNodeData>>> = ({
 									}}
 									placeholder="舊欄位名"
 									className={`flex-1 px-1.5 py-0.5 rounded border text-[11px] font-mono ${
-										isLight
-											? "bg-white border-stone-200 text-stone-800"
-											: "bg-slate-950 border-slate-800 text-slate-200"
+										"bg-[var(--syn-bg-input)] border-[var(--syn-border)] text-[var(--syn-text-primary)]"
 									}`}
 								/>
 								<span className="text-[10px] font-mono opacity-50">
@@ -2043,9 +1923,7 @@ export const AlteryxNode: React.FC<NodeProps<Node<AlteryxNodeData>>> = ({
 									}}
 									placeholder="新欄位名"
 									className={`flex-1 px-1.5 py-0.5 rounded border text-[11px] font-mono ${
-										isLight
-											? "bg-white border-stone-200 text-lime-700"
-											: "bg-slate-950 border-slate-800 text-lime-400"
+										"bg-[var(--syn-bg-input)] border-[var(--syn-border)] text-[var(--syn-accent)]"
 									}`}
 								/>
 								<button
@@ -2766,9 +2644,7 @@ export const AlteryxNode: React.FC<NodeProps<Node<AlteryxNodeData>>> = ({
 				{showSqlPreview && (
 					<div
 						className={`p-2 rounded font-mono text-[10px] border ${
-							isLight
-								? "bg-stone-900 text-stone-200 border-stone-800"
-								: "bg-slate-950 text-slate-400 border-slate-800"
+							"bg-[var(--syn-bg-code)] text-[var(--syn-text-code)] border-[var(--syn-border)]"
 						}`}
 					>
 						<code>{data.sqlQuery}</code>
@@ -2779,9 +2655,7 @@ export const AlteryxNode: React.FC<NodeProps<Node<AlteryxNodeData>>> = ({
 				{showPlan && (
 					<div
 						className={`p-2 rounded font-mono text-[9px] border whitespace-pre overflow-auto max-h-40 ${
-							isLight
-								? "bg-stone-900 text-stone-200 border-stone-800"
-								: "bg-slate-950 text-slate-400 border-slate-800"
+							"bg-[var(--syn-bg-code)] text-[var(--syn-text-code)] border-[var(--syn-border)]"
 						}`}
 					>
 						{planError ? (
@@ -2798,7 +2672,7 @@ export const AlteryxNode: React.FC<NodeProps<Node<AlteryxNodeData>>> = ({
 			{/* 👉 右側 Source 埠 */}
 			{nodeType === "FILTER" ? (
 				<>
-					<span className="absolute right-2 top-[30%] -translate-y-1/2 text-[9px] font-mono font-bold text-emerald-600 dark:text-emerald-400">
+					<span className="absolute right-2 top-[30%] -translate-y-1/2 text-[9px] font-mono font-bold text-[var(--syn-success)]">
 						T
 					</span>
 					<Handle
@@ -2806,9 +2680,9 @@ export const AlteryxNode: React.FC<NodeProps<Node<AlteryxNodeData>>> = ({
 						id="true"
 						position={Position.Right}
 						style={{ top: "30%", backgroundColor: "#10B981" }}
-						className="w-2.5 h-2.5 border-2 border-white dark:border-slate-900 -right-1.5"
+						className="w-2.5 h-2.5 border-2 border-[var(--syn-bg-card)] -right-1.5"
 					/>
-					<span className="absolute right-2 top-[70%] -translate-y-1/2 text-[9px] font-mono font-bold text-rose-600 dark:text-rose-400">
+					<span className="absolute right-2 top-[70%] -translate-y-1/2 text-[9px] font-mono font-bold text-[var(--syn-danger)]">
 						F
 					</span>
 					<Handle
@@ -2816,7 +2690,7 @@ export const AlteryxNode: React.FC<NodeProps<Node<AlteryxNodeData>>> = ({
 						id="false"
 						position={Position.Right}
 						style={{ top: "70%", backgroundColor: "#EF4444" }}
-						className="w-2.5 h-2.5 border-2 border-white dark:border-slate-900 -right-1.5"
+						className="w-2.5 h-2.5 border-2 border-[var(--syn-bg-card)] -right-1.5"
 					/>
 				</>
 			) : (
@@ -2824,7 +2698,7 @@ export const AlteryxNode: React.FC<NodeProps<Node<AlteryxNodeData>>> = ({
 					type="source"
 					position={Position.Right}
 					style={{ top: "50%", backgroundColor: tokens.accent }}
-					className="w-2.5 h-2.5 border-2 border-white dark:border-slate-900 -right-1.5 -translate-y-1/2"
+					className="w-2.5 h-2.5 border-2 border-[var(--syn-bg-card)] -right-1.5 -translate-y-1/2"
 				/>
 			)}
 		</div>
