@@ -19,6 +19,11 @@ import { ikaros } from "../../../engine/ikaros/client";
 // 只為了拿「這個節點真正會跑的語句清單」—— EXPLAIN 需要單一語句，
 // 而自己用 `;` 切字串會被字面值裡的 `;` 騙到。編譯器是唯一可靠來源。
 import { compileNodeStatements } from "../../../engine/astCompiler";
+// Join 鍵建議：只用 schema（名稱 + 型別），結構上讀不到資料。
+import {
+	suggestJoinKeys,
+	isConfidentSuggestion,
+} from "../../../engine/suggest";
 import {
 	qi,
 	hasCurrentField,
@@ -1159,6 +1164,49 @@ export const AlteryxNode: React.FC<NodeProps<Node<AlteryxNodeData>>> = ({
 								options={upstream.byTable[1] || []}
 							/>
 						</div>
+
+						{/* Join 鍵建議。只用 schema（名稱 + 型別），不讀資料。
+						    已經是同一組時不顯示 —— 提示的價值在於「你還沒設對」。 */}
+						{(() => {
+							const left = upstream.byTable[0] || [];
+							const right = upstream.byTable[1] || [];
+							// 兩邊都還沒讀到 schema（表還沒跑過）就沒什麼好建議
+							if (left.length === 0 || right.length === 0) return null;
+							const top = suggestJoinKeys(left, right, 1)[0];
+							if (!top) return null;
+							if (
+								(config.leftKey || "id") === top.left &&
+								(config.rightKey || "id") === top.right
+							) {
+								return null;
+							}
+							const confident = isConfidentSuggestion(top);
+							return (
+								<button
+									type="button"
+									// 一次呼叫 updateConfigValue 帶兩個鍵。
+									// 分兩次呼叫 updateConfig 會踩 stale closure：
+									// 第二次讀到的 config 還是舊的，於是把第一次寫進去的
+									// leftKey 蓋掉 —— 兩個欄位只會生效一個。
+									onClick={() =>
+										updateConfigValue({
+											leftKey: top.left,
+											rightKey: top.right,
+										})
+									}
+									title={`依據：${top.reason}`}
+									className={`text-[9px] font-mono leading-tight text-left hover:underline ${
+										confident
+											? "text-emerald-600 dark:text-emerald-400"
+											: "text-amber-600 dark:text-amber-400"
+									}`}
+								>
+									{confident ? "建議鍵" : "可能是"}：{top.left} ={" "}
+									{top.right}
+									<span className="opacity-60">（{top.reason}）</span>
+								</button>
+							);
+						})()}
 					</div>
 				)}
 
@@ -1217,6 +1265,45 @@ export const AlteryxNode: React.FC<NodeProps<Node<AlteryxNodeData>>> = ({
 									未設定左右鍵 → 這個節點會直接通過（passthrough），不做任何比對
 								</div>
 							)}
+
+							{/* Join 鍵建議 —— 與 JOIN 節點共用同一份推導。
+							    模糊比對的預設鍵是空的（不像 JOIN 預設 "id"），所以這裡
+							    比對的是空字串。 */}
+							{(() => {
+								const left = upstream.byTable[0] || [];
+								const right = upstream.byTable[1] || [];
+								if (left.length === 0 || right.length === 0) return null;
+								const top = suggestJoinKeys(left, right, 1)[0];
+								if (!top) return null;
+								if (
+									String(config.leftKey ?? "") === top.left &&
+									String(config.rightKey ?? "") === top.right
+								) {
+									return null;
+								}
+								const confident = isConfidentSuggestion(top);
+								return (
+									<button
+										type="button"
+										onClick={() =>
+											updateConfigValue({
+												leftKey: top.left,
+												rightKey: top.right,
+											})
+										}
+										title={`依據：${top.reason}。名稱相同不代表內容對得上 —— 模糊比對的價值就在拼字不同，記得確認門檻。`}
+										className={`text-[9px] font-mono leading-tight text-left hover:underline ${
+											confident
+												? "text-emerald-600 dark:text-emerald-400"
+												: "text-amber-600 dark:text-amber-400"
+										}`}
+									>
+										{confident ? "建議鍵" : "可能是"}：{top.left} ={" "}
+										{top.right}
+										<span className="opacity-60">（{top.reason}）</span>
+									</button>
+								);
+							})()}
 
 							<div className="flex space-x-1">
 								<select
