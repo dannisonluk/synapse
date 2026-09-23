@@ -1404,6 +1404,49 @@ export async function runDuckDbWasmChecks(root, loadTs, fallbackPipelines = []) 
 	}
 
 	// =====================================================================
+	// 11k. exportDb.ts — 產生的載入語句能不能被解析
+	// =====================================================================
+	// 「寫入外部資料庫」在瀏覽器裡做不到（沒有網路、INSTALL 是 no-op），所以
+	// 這個功能只產生語句。能驗的就是：**產生的語句是合法的 SQL**。
+	//
+	// 判準刻意不是「執行成功」而是「錯誤不是語法錯誤」—— 連不上伺服器是預期的，
+	// 語法錯才是我們的 bug。這兩件事的錯誤訊息完全不同，可以分辨。
+	{
+		const dbExporter = await loadTs("apps/web/src/engine/exportDb.ts");
+		const SELECT = `SELECT * FROM as_good`;
+
+		const syntaxErrors = [];
+		const outcomes = {};
+		for (const dialect of ["postgres", "mysql", "sqlite", "duckdb"]) {
+			const script = dbExporter.buildDbLoadScript(SELECT, {
+				dialect,
+				schema: "public",
+				table: "orders",
+			});
+			try {
+				// 逐句執行：前面的 ATTACH 失敗是預期的，重點是**語法**能被接受
+				for (const stmt of script.statements) {
+					conn.query(stmt.replace(/synapse_out\./, ""));
+				}
+				outcomes[dialect] = "ok";
+			} catch (err) {
+				const msg = String(err.message).split("\n")[0];
+				outcomes[dialect] = msg.slice(0, 60);
+				if (/Parser Error|syntax error|Expected .* but got/i.test(msg)) {
+					syntaxErrors.push(`${dialect}: ${msg.slice(0, 90)}`);
+				}
+			}
+		}
+		add("no dialect produces a syntax error", syntaxErrors, []);
+		// 反向：確認上面那條不是「什麼都沒跑到」而空過 ——
+		// 至少要有 dialect 真的被引擎拒絕（缺擴充／連不上），否則代表迴圈沒執行
+		add("...and the engine did evaluate the statements (not a vacuous pass)",
+			Object.values(outcomes).some((o) => o !== "ok"), true);
+		add("...and a postgres script is rejected for the missing extension, not for syntax",
+			/extension|postgres/i.test(String(outcomes.postgres)), true);
+	}
+
+	// =====================================================================
 	// 12. 視窗 / 序列組：MULTI_ROW_FORMULA / RUNNING_TOTAL / RANK
 	// =====================================================================
 	conn.query(

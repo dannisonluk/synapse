@@ -1609,6 +1609,106 @@ section("2k. exportDbt.ts — dbt 專案匯出");
 }
 
 // ===========================================================================
+// 2l. exportDb.ts — 寫入外部資料庫（只產生語句）
+// ===========================================================================
+// 這個功能的價值一半在「產生對的 SQL」，另一半在**安全**：連線字串含帳密，
+// 而節點設定會被寫進存檔與分享連結。所以憑證不進設定這件事要由斷言守住，
+// 不能只靠註解提醒。
+const dbMod = await loadTs("apps/web/src/engine/exportDb.ts");
+section("2l. exportDb.ts — 寫入外部資料庫（只產生語句）");
+
+{
+	const Q = (t) => dbMod.qualifiedTable(t);
+	check("a table name is quoted", Q({ dialect: "postgres", table: "orders" }), `"orders"`);
+	check("a schema is quoted separately", Q({ dialect: "postgres", schema: "public", table: "orders" }),
+		`"public"."orders"`);
+	check("a blank schema is omitted", Q({ dialect: "postgres", schema: "  ", table: "orders" }), `"orders"`);
+	check("a blank table yields nothing", Q({ dialect: "postgres", table: "  " }), "");
+	// 表名是使用者可控的，而它會被插進 SQL
+	check("a hostile table name is escaped", Q({ dialect: "postgres", table: 'a"; DROP TABLE x; --' }),
+		`"a""; DROP TABLE x; --"`);
+}
+
+{
+	const SELECT = "SELECT * FROM final_table";
+	const pg = dbMod.buildDbLoadScript(SELECT, { dialect: "postgres", schema: "public", table: "orders" });
+	check("postgres loads the extension first", pg.statements.slice(0, 2), ["INSTALL postgres;", "LOAD postgres;"]);
+	check("...then attaches with an explicit type",
+		pg.statements[2], `ATTACH 'host=YOUR_HOST port=5432 dbname=YOUR_DB user=YOUR_USER password=YOUR_PASSWORD' AS synapse_out (TYPE postgres);`);
+	check("...then creates the table from the select",
+		pg.statements[3], `CREATE TABLE synapse_out."public"."orders" AS\n${SELECT};`);
+	check("...then detaches", pg.statements[4], "DETACH synapse_out;");
+
+	// sqlite 的連線是路徑，沒有 TYPE 子句以外的差異；duckdb 檔則完全不需要擴充
+	const sq = dbMod.buildDbLoadScript(SELECT, { dialect: "sqlite", table: "t" });
+	check("sqlite still installs its extension", sq.statements[0], "INSTALL sqlite;");
+	const dk = dbMod.buildDbLoadScript(SELECT, { dialect: "duckdb", table: "t" });
+	check("a duckdb file needs no extension at all",
+		dk.statements.some((s) => s.startsWith("INSTALL") || s.startsWith("LOAD")), false);
+	check("...and no TYPE clause",
+		dk.statements[0].includes("(TYPE"), false);
+	check("...but is still attached", dk.statements[0].startsWith("ATTACH "), true);
+
+	// 尾端分號不該被帶進子查詢
+	check("a trailing semicolon on the select is stripped",
+		dbMod.buildDbLoadScript("SELECT 1;", { dialect: "postgres", table: "t" }).statements[3],
+		`CREATE TABLE synapse_out."t" AS\nSELECT 1;`);
+	// 沒有表名 → 不產生一句會失敗的 SQL，而是留 TODO
+	const noTable = dbMod.buildDbLoadScript(SELECT, { dialect: "postgres", table: "" });
+	has("a missing table name leaves a TODO instead of a broken statement",
+		noTable.statements[3], "TODO");
+	has("...and the note explains the missing table name", noTable.notes.join("\n"), "沒有指定目標表名");
+	// 沒有查詢 → 什麼都不產生
+	const noSelect = dbMod.buildDbLoadScript("", { dialect: "postgres", table: "t" });
+	check("an empty select produces no statements", noSelect.statements, []);
+	has("...with a reason", noSelect.notes.join("\n"), "沒有可寫入的查詢");
+}
+
+{
+	// --- 安全：憑證永遠不進設定 ---
+	//
+	// 節點設定會被寫進工作流存檔與分享連結。憑證一旦進設定，就會跟著檔案
+	// 傳給別人、也會出現在 URL 裡。所以這個模組**只產生佔位值**。
+	const s = dbMod.buildDbLoadScript("SELECT 1", { dialect: "postgres", table: "t" });
+	const attach = s.statements.find((x) => x.startsWith("ATTACH"));
+	has("the connection string is a placeholder, not a credential", attach, "YOUR_PASSWORD");
+	check("...and no dialect leaks a real-looking default",
+		/(host=\S+\.\S+|password=[^Y])/.test(attach), false);
+	has("...and the notes say the placeholder must be filled in by hand",
+		s.notes.join("\n"), "佔位值");
+
+	// 呼叫端若硬要傳憑證，至少要被 escape（但仍不該傳 —— 這是防禦，不是鼓勵）
+	const injected = dbMod.buildDbLoadScript("SELECT 1", {
+		dialect: "postgres", table: "t", connectionHint: "host=x'; DROP TABLE y; --",
+	});
+	check("a quote in the connection hint is escaped",
+		injected.statements[2].includes("''"), true);
+}
+
+{
+	const s = dbMod.buildDbLoadScript("SELECT 1", { dialect: "postgres", table: "t" });
+	// 使用者最需要知道的一件事，必須寫在腳本裡而不只是文件裡
+	has("the script says it cannot run in the browser",
+		s.notes.join("\n"), "不能在瀏覽器裡跑");
+	has("...and that the syntax was never verified against a live server",
+		s.notes.join("\n"), "未對真實伺服器驗證過");
+	has("...and that CREATE TABLE fails if the table exists",
+		s.notes.join("\n"), "已存在時會失敗");
+	// duckdb 檔沒有「目標表已存在」的問題敘述（那是同一個檔案的操作）
+	check("the create-table caveat is skipped for a duckdb file",
+		dbMod.buildDbLoadScript("SELECT 1", { dialect: "duckdb", table: "t" })
+			.notes.join("\n").includes("已存在時會失敗"), false);
+
+	const text = dbMod.scriptToText(s, "測試標題");
+	has("the text form starts with a title", text, "-- 測試標題");
+	has("...includes every note as a comment", text, "-- 需要");
+	has("...and includes the statements", text, "CREATE TABLE");
+	// 每一個註解行都必須以 `--` 開頭，否則那行會被當成 SQL 執行
+	check("every header line is a SQL comment",
+		text.split("\n").slice(0, 6).every((l) => l === "" || l.startsWith("--")), true);
+}
+
+// ===========================================================================
 // 3. Hermes patch resolution
 // ===========================================================================
 const patchMod = await loadTs("apps/web/src/engine/patch.ts");
@@ -3558,6 +3658,43 @@ section("11. repo 一致性 — 衍生產物、設定檔、死程式碼");
 	has("...and tells the user the download is a merged text file",
 		canvasSrc, "===== 路徑 =====");
 	has("...and the dbt export is reachable from the palette too", canvasSrc, 'case "export-dbt":');
+
+	// --- 寫入外部資料庫（只產生語句）---
+	has("the canvas can export a database load script", canvasSrc, "buildDbLoadScript(cte.query");
+	// 用 cte.query 而不是 cte.sql：後者含 `LOAD spatial;`，那不是合法的子查詢
+	has("...using the standalone query, not the whole script", canvasSrc, "cte.query");
+	has("...and the DB export is reachable from the palette too", canvasSrc, 'case "export-db":');
+	// 憑證不可以進設定 —— 設定會被寫進存檔與分享連結
+	check("...and no connection string is stored in node config",
+		/buildDbLoadScript\([^)]*password\s*[:=]/i.test(canvasSrc), false);
+
+	// --- 命令面板的分派表不可以有 stale closure ---
+	//
+	// `handlePaletteAction` 是一個 dispatch switch：每個 case 呼叫一個 handler，
+	// 而那些 handler 必須列在 useCallback 的 deps 裡。漏掉的話它會捕捉到**舊的**
+	// 閉包 —— 例如匯出會拿到上一次的圖，而且完全不會報錯。
+	//
+	// 這條守門是補一個真的踩過的 bug：上一輪加了 `case "export-dbt"` 卻忘了
+	// 加進 deps，於是匯出 dbt 會用到過期的 nodes。
+	{
+		const start = canvasSrc.indexOf("const handlePaletteAction");
+		// 切到下一個區塊註解為止 —— 這樣 deps 陣列才會在切片裡面。
+		// 第一版只切到第一個 `],`，而那正好是 deps 陣列的結尾 → 陣列內容不在
+		// 切片裡，於是每個 handler 都被判成「漏了」。守門自己的 bug 也是 bug。
+		const nextBlock = canvasSrc.indexOf("/** 點擊節點", start);
+		const body = canvasSrc.slice(start, nextBlock > start ? nextBlock : start + 6000);
+		// deps 陣列是 `\n\t\t[\n` 開頭（兩個 tab）；switch 本體在它之前
+		const depsAt = body.lastIndexOf("\n\t\t[\n");
+		const switchPart = depsAt > 0 ? body.slice(0, depsAt) : body;
+		const depsPart = depsAt > 0 ? body.slice(depsAt) : "";
+		const called = [...new Set([...switchPart.matchAll(/\b(handle[A-Z]\w+)\s*\(/g)].map((m) => m[1]))];
+		const declared = new Set([...depsPart.matchAll(/\b(handle[A-Z]\w+)\b/g)].map((m) => m[1]));
+		const missing = called.filter((h) => !declared.has(h)).sort();
+		check("every handler in the palette dispatch table is in its deps array", missing, []);
+		// 反向：確認真的解析到了東西，否則上面那條會空過
+		check("...and the dispatch table was actually parsed", called.length >= 8, true);
+		check("...and the deps array was actually found", depsAt > 0, true);
+	}
 
 	// --- 主題：技術債上限 ---
 	//
