@@ -3561,21 +3561,19 @@ section("11. repo 一致性 — 衍生產物、設定檔、死程式碼");
 
 	// --- 主題：技術債上限 ---
 	//
-	// 這些檔案還在使用 `isLight ? "bg-stone-50" : "bg-slate-900"` —— 每多一處，
-	// 兩套主題就多一個可能分岔的地方（實際上已經分岔了：有些地方淺色用 stone、
-	// 有些用 gray；深色有的 slate 有的 gray-900）。
+	// 遷移完成：97 處 → 5 處。剩下的 5 處**不是債**，是切換鈕本身（見下面）。
+	// 上限一律是 0，只有 UnifiedWorkbench 例外。
 	//
-	// **上限只可以往下調，不可以往上調。** 新增程式碼要直接用 theme/ui.ts 的
-	// 語意常數，那裡的顏色來自 `--syn-*`，不需要判斷主題。
-	//
-	// 遷移方式：`isLight ? "bg-stone-50/80 border-stone-200/60" : "bg-slate-900/60 border-slate-800"`
-	//        → `${ui.subtle} ${ui.border}`
+	// 新增程式碼要直接用 theme/ui.ts 的語意常數，顏色來自 `--syn-*`，
+	// 不需要判斷主題。**上限只可以往下調。**
 	const THEME_BRANCH_BUDGET = {
-		"apps/web/src/components/nymph/nodes/AlteryxNode.tsx": 53,
-		"apps/web/src/components/nymph/nodes/SqlNode.tsx": 2,
-		"apps/web/src/components/nymph/nodes/VizChartNode.tsx": 18,
-		"apps/web/src/components/nymph/NymphCanvas.tsx": 2,
-		"apps/web/src/components/workbench/DataDrawer.tsx": 16,
+		"apps/web/src/components/nymph/nodes/AlteryxNode.tsx": 0,
+		"apps/web/src/components/nymph/nodes/SqlNode.tsx": 0,
+		"apps/web/src/components/nymph/nodes/VizChartNode.tsx": 0,
+		"apps/web/src/components/nymph/NymphCanvas.tsx": 0,
+		"apps/web/src/components/workbench/DataDrawer.tsx": 0,
+		// 例外：切換鈕必須知道「現在是哪個主題」才能標對按鈕文字與 aria-label。
+		// 那不是配色分支，是 UI 狀態，所以不該被消滅。
 		"apps/web/src/components/workbench/UnifiedWorkbench.tsx": 4,
 	};
 	/**
@@ -3605,9 +3603,35 @@ section("11. repo 一致性 — 衍生產物、設定檔、死程式碼");
 		}
 		check("no file exceeds its theme-branch budget (the ceiling only goes down)", over, []);
 		// 全部遷移完的檔案必須維持在 0，否則新程式碼會默默走回舊路
-		const regressed = ["apps/web/src/components/workbench/CommandPalette.tsx"]
-			.filter((rel) => /isLight\s*\?/.test(codeOnly(rel)));
+		const regressed = [
+			"apps/web/src/components/workbench/CommandPalette.tsx",
+			"apps/web/src/components/nymph/nodes/AlteryxNode.tsx",
+			"apps/web/src/components/nymph/nodes/VizChartNode.tsx",
+			"apps/web/src/components/workbench/DataDrawer.tsx",
+		].filter((rel) => /isLight\s*\?/.test(codeOnly(rel)));
 		check("fully migrated components stay migrated", regressed, []);
+	}
+
+	// --- `dark:` variant 必須跟隨我們的主題，而不是作業系統 ---
+	//
+	// Tailwind 的 darkMode 預設是 `media`，那會讓 `dark:` 跟隨 **OS 偏好**。
+	// 於是「OS 是深色、使用者手動選淺色」時，`dark:` 的樣式仍然生效 ——
+	// 一個只看 OS 不看使用者的不一致，而且在切換主題的開發者機器上看不出來。
+	// 修法是把 darkMode 綁到 ThemeContext 已經在設的 `data-theme`。
+	{
+		const twConfig = read("apps/web/tailwind.config.js");
+		has("tailwind's dark: variant is bound to our data-theme attribute",
+			twConfig, '[data-theme="dark"]');
+		check("...and not left on the OS preference",
+			/darkMode:\s*["']media["']/.test(twConfig), false);
+		has("the theme provider sets that attribute",
+			read("apps/web/src/theme/ThemeContext.tsx"), "root.dataset.theme = mode");
+		// 而且不該再有殘留的 dark: variant —— 顏色一律走 token
+		const darkVariants = Object.keys(THEME_BRANCH_BUDGET)
+			.concat(["apps/web/src/components/workbench/CommandPalette.tsx"])
+			.flatMap((rel) => (codeOnly(rel).match(/dark:[a-z0-9-]+/g) ?? []).map((v) => `${rel}: ${v}`));
+		check("no hand-written dark: variant remains in the migrated components",
+			darkVariants, []);
 	}
 
 	// --- 字體層級：9px 退場 ---
