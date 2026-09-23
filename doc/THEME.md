@@ -220,10 +220,46 @@ focus-visible:ring-2 ring-[var(--syn-border-focus)]
 
 ## 8. 目前狀態與待辦
 
-- 已完全遷移：`CommandPalette.tsx`（參考實作，零主題分支）
-- 待遷移：97 處，集中在 `AlteryxNode.tsx`（53）、`VizChartNode.tsx`（18）、
-  `DataDrawer.tsx`（16）
+**遷移完成**：97 處 `isLight ? … : …` → **5 處**。
 
-`scripts/verify.mjs` 的 §11x 有一組**技術債上限**：每個檔案的 `isLight`
-出現次數不得超過目前的值，而且**上限只可以往下調**。已遷移的檔案必須維持 0。
-這樣遷移可以漸進，但不會倒退。
+剩下的 5 處都在 `UnifiedWorkbench.tsx`，而且是**刻意的** —— 主題切換鈕必須知道
+「現在是哪個主題」才能標對按鈕文字與 `aria-label`。那不是配色分支，是 UI 狀態，
+不該被消滅。
+
+所有其他元件（`AlteryxNode` / `VizChartNode` / `SqlNode` / `NymphCanvas` /
+`DataDrawer` / `CommandPalette`）都不再判斷主題。
+
+### `dark:` variant 的陷阱（已修）
+
+Tailwind 的 `darkMode` 預設是 `media`，而本專案原本沒有設定它 ——
+所以 16 處 `dark:` variant 跟隨的是**作業系統**，不是主題切換。
+「OS 是深色、使用者手動選淺色」時那些樣式仍然生效，而這個不一致在
+「OS 設定與正在編輯的主題一致」的開發者機器上**完全看不出來**。
+
+修法：`darkMode: ["class", '[data-theme="dark"]']`，綁到 `ThemeContext`
+已經在設的屬性上（不要再加一個 `dark` class —— 兩份狀態會不同步）。
+
+那 16 處現在也全部消失了，因為語意顏色本來就該走 token。
+
+### 順帶清掉的
+
+- 三個沒有語意意義的色相（fuchsia / orange / lime）→ `--syn-accent`
+- FILTER 運算子欄位在淺色是 amber、深色是 cyan（**兩套主題不同色相**）→ `--syn-warning`
+- `DataDrawer` / `VizChartNode` 裡還寫著**舊的**淺色畫布色 `#FDFBF7`，
+  已經與新 token 不符 —— 那是「分支還在」時不會被任何測試抓到的漂移
+
+### 守門
+
+`scripts/verify.mjs` 的 §11x：
+
+- 每個檔案的 `isLight` 出現次數上限，**只可以往下調**（現在除了切換鈕之外都是 0）
+- 已遷移的元件必須維持 0
+- **不得再出現手寫的 `dark:` variant**，而且 `tailwind.config.js` 的 `darkMode`
+  必須綁在 `[data-theme="dark"]` 上 —— 後者才是防止前者復活的關鍵
+- 提供者必須繼續設定那個屬性（否則 variant 會靜默失效）
+
+### 副產品
+
+移除硬編碼色票讓產生的 CSS 一起縮小：**45.38 kB → 38.54 kB**
+（gzip 8.28 → 7.40）。
+

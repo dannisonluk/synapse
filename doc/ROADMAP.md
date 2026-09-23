@@ -29,10 +29,11 @@
 | 4.5 分享連結 | **已完成** | `038bf6e` + `0a3f050` |
 
 **不在此表但已完成**：主題系統重做（見 [`doc/THEME.md`](THEME.md)）——
-語意 token → CSS 變數、兩套中性配色、對比度斷言。`872341f` + `ed67efe`。
+語意 token → CSS 變數、兩套中性配色、對比度斷言，以及 97 → 5 的遷移。
+`872341f` / `ed67efe` / `ccc055f` / `a47338f`。
 
-進度基準：**28 種節點、1048 條 assertion 全綠**、`tsc` 乾淨、
-build 1956 modules / 801.48 kB（gzip 245.30 kB）。
+進度基準：**28 種節點、1052 條 assertion 全綠**、`tsc` 乾淨、
+build 1956 modules / 799.79 kB（gzip 244.88 kB）；CSS 38.54 kB（gzip 7.40）。
 
 **環境限制（2026-09-23 起）**：這個沙箱不允許從 Node spawn 子行程
 （`spawnSync` 對任何執行檔都回 `EBUSY`，連 node 自己也是）。所以所有需要
@@ -457,8 +458,6 @@ Python 的檢查會 SKIP —— 4.1 快照測試因此暫時無法在本地驗�
 2. **OPFS（1.5）** —— 需要瀏覽器才能驗證，純決策邏輯可以抽出來測。
 3. **Patch 預覽（3.2）** —— 管線已齊（`resolveAstPatch` + `auditAstPatch`），
    缺的只是 UI。
-4. **主題遷移收尾** —— 還有 97 處 `isLight ? … : …`（見 `doc/THEME.md` §8）。
-   上限已被守門固定，只會往下。
 
 需要先處理前提的：
 
