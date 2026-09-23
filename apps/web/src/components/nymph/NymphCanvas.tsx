@@ -34,6 +34,7 @@ import {
 	Undo2,
 	Redo2,
 	Command,
+	Share2,
 } from "lucide-react";
 import { SqlNode } from "./nodes/SqlNode";
 import { ParticleEdge } from "./edges/ParticleEdge";
@@ -66,6 +67,12 @@ import {
 } from "../../engine/cache";
 import { History } from "../../engine/history";
 import { rankActions, rankNodeTypes } from "../../engine/palette";
+import {
+	encodeShareLink,
+	decodeShareLink,
+	readShareToken,
+	buildShareUrl,
+} from "../../engine/shareLink";
 import { getLayoutedElements } from "../../engine/autoLayout";
 import { resolveAstPatch, toFlowEdges } from "../../engine/patch";
 import {
@@ -1162,10 +1169,90 @@ const CanvasInner: React.FC<NymphCanvasProps> = ({
 		[hydrateWorkflow, setNodes, setEdges, fitView],
 	);
 
+	/**
+	 * 產生可分享的連結並複製到剪貼簿。
+	 *
+	 * 只分享工作流，**不分享資料**。編碼前會剝掉 sqlQuery 這類衍生欄位
+	 * （匯入端本來就會重編），連結因此小一半以上。
+	 *
+	 * 超過長度上限時**明確失敗**，不產生一條會被截斷的連結 ——
+	 * 前者使用者知道要改用 JSON 匯出，後者打開後是壞的而且沒有線索。
+	 */
+	const handleShareLink = useCallback(async () => {
+		const enc = encodeShareLink({
+			version: 1,
+			title: "Synapse workflow",
+			nodes: nodesRef.current,
+			edges: edgesRef.current,
+		});
+		if (!enc.ok || !enc.token) {
+			setNotice({ kind: "error", text: enc.error || "無法產生分享連結。" });
+			return;
+		}
+
+		const url = buildShareUrl(window.location.href, enc.token);
+		try {
+			await navigator.clipboard.writeText(url);
+			setNotice({
+				kind: "ok",
+				text: `分享連結已複製（${enc.length} 字元）。只含工作流、不含資料 —— 對方需要自己準備來源檔。`,
+			});
+		} catch {
+			// 剪貼簿 API 在非 HTTPS 或未授權時會失敗。那不是「功能壞了」，
+			// 只是沒能自動複製 —— 把連結顯示出來讓使用者自己複製。
+			setNotice({ kind: "ok", text: `請手動複製：${url}` });
+		}
+	}, []);
+
+	/**
+	 * 開頁時檢查 URL fragment 有沒有分享連結。
+	 *
+	 * 只讀 fragment（`#` 之後）：fragment 不會送到伺服器，所以工作流內容
+	 * 不會出現在任何 access log 裡。
+	 *
+	 * 只跑一次，而且**不會**覆蓋已經有內容的畫布 —— 自動存檔還原的內容
+	 * 是使用者自己的，不該被一條網址蓋掉。
+	 */
+	const shareCheckedRef = useRef(false);
+	useEffect(() => {
+		if (shareCheckedRef.current) return;
+		shareCheckedRef.current = true;
+
+		const token = readShareToken(window.location.href);
+		if (!token) return;
+
+		const dec = decodeShareLink(token);
+		if (!dec.ok) {
+			setNotice({ kind: "error", text: `分享連結無法讀取：${dec.error}` });
+			return;
+		}
+		// 交給既有的匯入驗證路徑，不在這裡抄第二份欄位檢查
+		const parsed = importWorkflowJson(JSON.stringify(dec.workflow));
+		if (!parsed || parsed.nodes.length === 0) {
+			setNotice({ kind: "error", text: "分享連結裡沒有可用的節點。" });
+			return;
+		}
+		if (hadContentRef.current) {
+			setNotice({
+				kind: "error",
+				text: "網址裡有分享連結，但畫布已經有內容 —— 沒有自動覆蓋。請先「New」清空再重新開啟連結。",
+			});
+			return;
+		}
+
+		const hydrated = hydrateWorkflow(parsed.nodes, parsed.edges);
+		setEdges(hydrated.edges);
+		setNodes(hydrated.nodes);
+		setTimeout(() => fitView({ duration: 600, padding: 0.2 }), 50);
+		setNotice({
+			kind: "ok",
+			text: `已從連結載入「${parsed.title}」：${parsed.nodes.length} 個節點。來源檔需要你自己準備。`,
+		});
+	}, [hydrateWorkflow, setNodes, setEdges, fitView]);
+
 	// 連線後不必在這裡重編譯：edges 一變，上面的 useEffect 就會統一重算。
 	// （也避免在 setEdges 的 updater 內再呼叫 setNodes —— StrictMode 會重複執行。）
-	const onConnect = useCallback(
-		(params: Connection) => {
+	const onConnect = useCallback(		(params: Connection) => {
 			setEdges((eds) => addEdge({ ...params, type: "particleEdge" }, eds));
 		},
 		[setEdges],
@@ -1261,6 +1348,7 @@ const CanvasInner: React.FC<NymphCanvasProps> = ({
 			{ id: "export-sql", label: "匯出 SQL", hint: "CTE", keywords: "export sql 匯出 下載" },
 			{ id: "export-python", label: "匯出 Python（Polars）", hint: ".py", keywords: "export python polars 匯出" },
 			{ id: "save", label: "儲存工作流", hint: "JSON", keywords: "save 儲存 存檔" },
+			{ id: "share", label: "複製分享連結", hint: "URL", keywords: "share link 分享 連結 網址" },
 			{ id: "load", label: "載入工作流", hint: "JSON", keywords: "load import open 載入 開啟" },
 			{ id: "new", label: "清空畫布", hint: "New", keywords: "new clear 清空 新增" },
 		],
@@ -1339,6 +1427,8 @@ const CanvasInner: React.FC<NymphCanvasProps> = ({
 					return handleExportPython();
 				case "save":
 					return handleSaveWorkflow();
+				case "share":
+					return void handleShareLink();
 				case "load":
 					// 載入是「開檔案選擇器」而不是「立刻讀一個檔案」——
 					// 借用既有的隱藏 input，不要在面板裡重寫一份讀檔邏輯。
@@ -1587,6 +1677,19 @@ const CanvasInner: React.FC<NymphCanvasProps> = ({
 					>
 						<Command className="w-3.5 h-3.5" />
 						<span>⌘K</span>
+					</button>
+					<button
+						onClick={handleShareLink}
+						title="複製分享連結（只含工作流，不含資料）"
+						style={{
+							backgroundColor: tokens.bgCard,
+							borderColor: tokens.border,
+							color: tokens.textPrimary,
+						}}
+						className="flex items-center space-x-1.5 border text-xs px-3 py-1.5 rounded-lg shadow-sm hover:opacity-80 transition-all font-medium"
+					>
+						<Share2 className="w-3.5 h-3.5" />
+						<span>Share</span>
 					</button>
 				</div>
 
