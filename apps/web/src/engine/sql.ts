@@ -229,6 +229,31 @@ export function safeOutputFileName(
 }
 
 /**
+ * 只接受 **http / https** 的絕對 URL，其餘一律回 null。
+ *
+ * 為什麼要限制 scheme：這個字串會被寫進**匯出的 SQL / Python 腳本**，而那些
+ * 腳本會跟著工作流檔案與分享連結傳出去。允許 `file://` 的話，就等於在
+ * 「別人分享給你的一份工作流」裡放了一個讀本機檔案的入口 ——
+ * 開啟者執行匯出腳本時會讀到他自己的檔案系統。
+ *
+ * 遠端讀取本來就只需要 http(s)，所以這個限制不損失任何功能。
+ */
+export function safeHttpUrl(value: unknown): string | null {
+	const s = String(value ?? "").trim();
+	if (!s) return null;
+	let url: URL;
+	try {
+		url = new URL(s);
+	} catch {
+		return null;
+	}
+	if (url.protocol !== "http:" && url.protocol !== "https:") return null;
+	// 有 host 才算絕對 URL（`new URL("http://")` 會拋，但保險一點）
+	if (!url.hostname) return null;
+	return url.toString();
+}
+
+/**
  * ASSERT 節點的檢查種類白名單。
  *
  *   NOT_NULL   → 指定欄位不得為 NULL

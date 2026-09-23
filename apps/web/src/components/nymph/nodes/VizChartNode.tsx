@@ -156,30 +156,22 @@ export const VizChartNode: React.FC<
 
 			{/* Header */}
 			<div
-				className={`flex items-center justify-between pb-2 border-b ${
-					"border-[var(--syn-border)]"
-				}`}
+				className={`flex items-center justify-between pb-2 border-b border-[var(--syn-border)]`}
 			>
 				<div className="flex items-center space-x-2">
 					<div
-						className={`p-1 rounded ${
-							"bg-[var(--syn-accent-soft)] text-[var(--syn-accent-soft-text)]"
-						}`}
+						className={`p-1 rounded bg-[var(--syn-accent-soft)] text-[var(--syn-accent-soft-text)]`}
 					>
 						<PieChart className="w-3.5 h-3.5" />
 					</div>
 					<div>
 						<div
-							className={`font-semibold ${
-								"text-[var(--syn-text-primary)]"
-							}`}
+							className={`font-semibold text-[var(--syn-text-primary)]`}
 						>
 							{data.label || "BI Chart"}
 						</div>
 						<div
-							className={`text-[9px] font-mono ${
-								"text-[var(--syn-text-secondary)]"
-							}`}
+							className={`text-[9px] font-mono text-[var(--syn-text-secondary)]`}
 						>
 							VIZ_CHART
 						</div>
@@ -187,9 +179,7 @@ export const VizChartNode: React.FC<
 				</div>
 				<button
 					onClick={renderChart}
-					className={`p-1 rounded ${
-						"hover:bg-[var(--syn-bg-hover)] text-[var(--syn-text-secondary)]"
-					}`}
+					className={`p-1 rounded hover:bg-[var(--syn-bg-hover)] text-[var(--syn-text-secondary)]`}
 				>
 					<RefreshCw
 						className={`w-3.5 h-3.5 ${
@@ -293,9 +283,7 @@ export const VizChartNode: React.FC<
 									{values[0]?.toLocaleString() || "0"}
 								</div>
 								<div
-									className={`text-[10px] font-mono mt-1 ${
-										"text-[var(--syn-text-muted)]"
-									}`}
+									className={`text-[10px] font-mono mt-1 text-[var(--syn-text-muted)]`}
 								>
 									{yAxis} (top row)
 								</div>
@@ -454,9 +442,7 @@ export const VizChartNode: React.FC<
 						)
 					) : (
 						<div
-							className={`text-center py-4 text-[10px] ${
-								"text-[var(--syn-text-secondary)]"
-							}`}
+							className={`text-center py-4 text-[10px] text-[var(--syn-text-secondary)]`}
 						>
 							{loading
 								? "Loading data..."

@@ -76,6 +76,7 @@ export const NODE_FIELDS: { readonly [K in NodeType]: readonly FieldSpec[] } = {
 	INPUT_DUCKDB: [
 		{ name: "tableName", kind: "text", label: "資料表", required: false },
 		{ name: "fileName", kind: "text", label: "檔案", required: false },
+		{ name: "sourceUrl", kind: "text", label: "遠端 URL", required: false },
 	],
 	OUTPUT: [
 		{ name: "fileName", kind: "text", label: "輸出檔名", required: false },

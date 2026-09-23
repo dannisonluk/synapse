@@ -101,10 +101,21 @@ export const NODE_CATALOG: Record<AlteryxNodeType, NodeSpec> = {
 		nodeType: "alteryxNode",
 		icon: "Database",
 		color: "text-emerald-500",
-		defaults: { tableName: "" },
+		// sourceUrl 也列進 defaults：`defaultConfigFor` 直接回傳這一份，而
+		// `normalizeConfig` 會補上每個欄位的 default。兩者不一致時，
+		// 「新拖進來的節點」與「Hermes 產生的節點」會拿到不同的 config 形狀 ——
+		// 守門會抓到（§3b）。
+		defaults: { tableName: "", sourceUrl: "" },
 		fields: [
 			{ name: "tableName", kind: "text", label: "資料表", hint: "留空則由平台依節點 id 指定" },
 			{ name: "fileName", kind: "text", label: "檔案", hint: "已上傳的檔名（CSV / Parquet）" },
+			{
+				name: "sourceUrl",
+				kind: "text",
+				label: "遠端 URL",
+				default: "",
+				hint: "http(s) 的 Parquet 網址。填了就取代上傳檔案 —— 但畫布讀不到（瀏覽器沒有網路），只有匯出的 SQL / Python 讀得到。",
+			},
 		],
 	},
 

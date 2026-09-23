@@ -159,6 +159,17 @@ export const NODE_CONFIG_SHAPE = {
 	/** 輸出格式：CSV | JSON。Polars 匯出會真的寫檔；DuckDB 由 UI 的下載鈕產生 */
 	outputFormat: "string",
 
+	// --- INPUT_DUCKDB 的遠端來源 -------------------------------------------
+	/**
+	 * 遠端 Parquet 的 URL（只接受 http / https，見 safeHttpUrl）。
+	 *
+	 * 填了就**取代**上傳檔案：編譯成 `read_parquet('https://…')`。
+	 *
+	 * ⚠ 畫布上讀不到 —— DuckDB-WASM 沒有網路。這個節點在瀏覽器裡會失敗，
+	 * 但**匯出的 SQL / Python 讀得到**，那才是它的用途。
+	 */
+	sourceUrl: "string",
+
 	// --- ASSERT -----------------------------------------------------------
 	/** 檢查種類：NOT_NULL（預設）| UNIQUE | ROW_COUNT | PREDICATE */
 	assertCheck: "string",

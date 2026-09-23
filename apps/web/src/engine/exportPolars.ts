@@ -14,7 +14,7 @@
 import type { Edge, Node } from "@xyflow/react";
 import { orderUpstreamSources, topologicalSort } from "./scheduler";
 import { resolveSourceTables, falseBranchTable } from "./astCompiler";
-import { safeOp, safeFunc, safeJoinType, safeFuzzyJoinType, safeExpr, safeUnionMode, safeSampleMode, safeImputeMethod, safeRankMethod, safeUnmatched, safeRegexMode, regexPattern, safeMultiFieldOutputMode, safeNewFieldSuffix, hasCurrentField, applyCurrentField, safeSplitMode, safeMatchFunc, matchIsSimilarity, matchThreshold, safePrefilter, safeScoreColumn, safeOutputFormat, safeOutputFileName, safeAssertCheck, safeAssertBound, safeAssertLabel, intLit } from "./sql";
+import { safeOp, safeFunc, safeJoinType, safeFuzzyJoinType, safeExpr, safeUnionMode, safeSampleMode, safeImputeMethod, safeRankMethod, safeUnmatched, safeRegexMode, regexPattern, safeMultiFieldOutputMode, safeNewFieldSuffix, hasCurrentField, applyCurrentField, safeSplitMode, safeMatchFunc, matchIsSimilarity, matchThreshold, safePrefilter, safeScoreColumn, safeOutputFormat, safeOutputFileName, safeAssertCheck, safeAssertBound, safeAssertLabel, safeHttpUrl, intLit } from "./sql";
 import { narrateNode } from "./narrate";
 
 // ---------------------------------------------------------------------------
@@ -544,6 +544,17 @@ function emitNode(
 
 	switch (type) {
 		case "INPUT_DUCKDB": {
+			// 遠端 Parquet：匯出的腳本**讀得到**（畫布讀不到，瀏覽器沒有網路）。
+			// 與 SQL 端共用 safeHttpUrl，所以兩邊對「什麼是合法來源」看法一致。
+			const remote = safeHttpUrl(config?.sourceUrl);
+			if (remote) {
+				return [
+					`# ⚠ 遠端來源：需要網路。畫布上讀不到（DuckDB-WASM 沒有網路），`,
+					`#   這一行是給匯出後在真的環境執行用的。`,
+					`${id} = pl.read_parquet(${pyStr(remote)})`,
+				].join("\n");
+			}
+
 			const fileName = String(config?.fileName || "");
 			if (!fileName) {
 				ctx.needsReview = true;

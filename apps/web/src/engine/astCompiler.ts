@@ -16,6 +16,7 @@ import {
 	safeJoinType,
 	safeFuzzyJoinType,
 	safeExpr,
+	safeHttpUrl,
 	safeUnionMode,
 	safeSampleMode,
 	safeImputeMethod,
@@ -393,6 +394,16 @@ export function compileNodeSelect(
 
 	switch (nodeType) {
 		case "INPUT_DUCKDB": {
+			// 遠端 Parquet：直接產生 `read_parquet('https://…')`。
+			//
+			// **畫布上讀不到** —— DuckDB-WASM 沒有網路，所以這個節點在瀏覽器裡
+			// 會失敗。但**匯出的 SQL / Python 可以讀**，而那正是這個功能的價值：
+			// 讓帶走的管線能接遠端資料，而不是只在畫布上好看。
+			const remote = safeHttpUrl(config.sourceUrl);
+			if (remote) {
+				// strLit 而非手寫引號：URL 是使用者可控的字串
+				return `SELECT * FROM read_parquet(${strLit(remote)})`;
+			}
 			// 有上傳檔案 → 讀取 src_${nodeId}；未載入 → 預設 raw_data（提供即時回饋）
 			const src = config.fileName
 				? config.tableName || `src_${nodeId}`

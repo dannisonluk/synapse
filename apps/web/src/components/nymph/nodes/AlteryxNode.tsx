@@ -610,15 +610,11 @@ export const AlteryxNode: React.FC<NodeProps<Node<AlteryxNodeData>>> = ({
 
 			{/* 頂部 Header */}
 			<div
-				className={`flex items-center justify-between pb-2 border-b ${
-					"border-[var(--syn-border)]"
-				}`}
+				className={`flex items-center justify-between pb-2 border-b border-[var(--syn-border)]`}
 			>
 				<div className="flex items-center space-x-2">
 					<div
-						className={`p-1 rounded ${
-							"bg-[var(--syn-bg-active)] text-[var(--syn-text-primary)]"
-						}`}
+						className={`p-1 rounded bg-[var(--syn-bg-active)] text-[var(--syn-text-primary)]`}
 					>
 						{nodeType === "INPUT_DUCKDB" && (
 							<Database className="w-3.5 h-3.5" />
@@ -653,16 +649,12 @@ export const AlteryxNode: React.FC<NodeProps<Node<AlteryxNodeData>>> = ({
 					</div>
 					<div>
 						<div
-							className={`font-semibold ${
-								"text-[var(--syn-text-primary)]"
-							}`}
+							className={`font-semibold text-[var(--syn-text-primary)]`}
 						>
 							{data.label || nodeType}
 						</div>
 						<div
-							className={`text-[9px] font-mono ${
-								"text-[var(--syn-text-secondary)]"
-							}`}
+							className={`text-[9px] font-mono text-[var(--syn-text-secondary)]`}
 						>
 							{nodeType}
 						</div>
@@ -671,9 +663,7 @@ export const AlteryxNode: React.FC<NodeProps<Node<AlteryxNodeData>>> = ({
 				<button
 					onClick={() => setShowSqlPreview(!showSqlPreview)}
 					title="顯示這個節點編譯出來的 SQL"
-					className={`p-1 rounded ${
-						"hover:bg-[var(--syn-bg-hover)] text-[var(--syn-text-secondary)]"
-					}`}
+					className={`p-1 rounded hover:bg-[var(--syn-bg-hover)] text-[var(--syn-text-secondary)]`}
 				>
 					<Code className="w-3.5 h-3.5" />
 				</button>
@@ -685,9 +675,7 @@ export const AlteryxNode: React.FC<NodeProps<Node<AlteryxNodeData>>> = ({
 						if (next && plan === null) void loadPlan();
 					}}
 					title="顯示執行計畫（EXPLAIN）。只做顯示不做解析 —— plan 的文字格式會隨版本改變。"
-					className={`p-1 rounded ${
-						"hover:bg-[var(--syn-bg-hover)] text-[var(--syn-text-secondary)]"
-					}`}
+					className={`p-1 rounded hover:bg-[var(--syn-bg-hover)] text-[var(--syn-text-secondary)]`}
 				>
 					<Gauge className="w-3.5 h-3.5" />
 				</button>
@@ -709,9 +697,7 @@ export const AlteryxNode: React.FC<NodeProps<Node<AlteryxNodeData>>> = ({
 								const file = e.dataTransfer.files?.[0];
 								if (file) handleFileUpload(file);
 							}}
-							className={`p-2.5 border-2 border-dashed rounded-lg text-center cursor-pointer transition-all ${
-								"border-[var(--syn-border)] hover:border-[var(--syn-accent)] bg-[var(--syn-bg-card)]"
-							}`}
+							className={`p-2.5 border-2 border-dashed rounded-lg text-center cursor-pointer transition-all border-[var(--syn-border)] hover:border-[var(--syn-accent)] bg-[var(--syn-bg-card)]`}
 						>
 							<input
 								type="file"
@@ -738,6 +724,27 @@ export const AlteryxNode: React.FC<NodeProps<Node<AlteryxNodeData>>> = ({
 										: "Supports .csv, .parquet"}
 								</div>
 							</label>
+						</div>
+
+						{/* 遠端 Parquet。填了 URL 就**取代**上傳檔案。
+						    畫布讀不到（瀏覽器沒有網路），所以一定要講清楚「只有匯出的
+						    腳本讀得到」—— 不講的話使用者只會看到節點失敗，然後以為是 bug。 */}
+						<div className="mt-2 space-y-1">
+							<div className="text-[10px] font-bold font-mono tracking-wider uppercase leading-tight opacity-60">
+								Remote Parquet URL
+							</div>
+							<input
+								value={String(config.sourceUrl ?? "")}
+								onChange={(e) => updateConfig("sourceUrl", e.target.value)}
+								placeholder="https://example.com/data.parquet"
+								className={`w-full px-1.5 py-0.5 text-[11px] ${ui.inputSm}`}
+							/>
+							{String(config.sourceUrl ?? "").trim() !== "" && (
+								<div className="text-[10px] font-mono leading-tight text-[var(--syn-warning)]">
+									⚠ 畫布讀不到遠端檔案（瀏覽器沒有網路）—— 這個節點在畫布上會
+									失敗，但匯出的 SQL / Python 讀得到。只接受 http / https。
+								</div>
+							)}
 						</div>
 
 						{/* Alteryx 風格：Preview (Sample Data) 資料表格 */}
@@ -823,9 +830,7 @@ export const AlteryxNode: React.FC<NodeProps<Node<AlteryxNodeData>>> = ({
 								onChange={(e) =>
 									updateConfig("op", e.target.value)
 								}
-								className={`px-1 rounded border text-[11px] font-mono ${
-									"bg-[var(--syn-bg-input)] border-[var(--syn-border)] text-[var(--syn-warning)]"
-								}`}
+								className={`px-1 rounded border text-[11px] font-mono bg-[var(--syn-bg-input)] border-[var(--syn-border)] text-[var(--syn-warning)]`}
 							>
 								<option value="=">=</option>
 								<option value=">">&gt;</option>
@@ -870,9 +875,7 @@ export const AlteryxNode: React.FC<NodeProps<Node<AlteryxNodeData>>> = ({
 									updateConfig("expression", e.target.value)
 								}
 								placeholder="Expression (e.g. amount * 1.1)"
-								className={`w-full px-1.5 py-0.5 rounded border text-[11px] font-mono ${
-									"bg-[var(--syn-bg-input)] border-[var(--syn-border)] text-[var(--syn-warning)]"
-								}`}
+								className={`w-full px-1.5 py-0.5 rounded border text-[11px] font-mono bg-[var(--syn-bg-input)] border-[var(--syn-border)] text-[var(--syn-warning)]`}
 							/>
 						</div>
 					</div>
@@ -900,9 +903,7 @@ export const AlteryxNode: React.FC<NodeProps<Node<AlteryxNodeData>>> = ({
 											updateConfigValue({ groupBy: next });
 										}}
 										placeholder="Group Key"
-										className={`flex-1 px-1.5 py-0.5 rounded border text-[11px] font-mono ${
-											"bg-[var(--syn-bg-input)] border-[var(--syn-border)] text-[var(--syn-text-primary)]"
-										}`}
+										className={`flex-1 px-1.5 py-0.5 rounded border text-[11px] font-mono bg-[var(--syn-bg-input)] border-[var(--syn-border)] text-[var(--syn-text-primary)]`}
 									/>
 									<button
 										type="button"
@@ -964,9 +965,7 @@ export const AlteryxNode: React.FC<NodeProps<Node<AlteryxNodeData>>> = ({
 												aggregations: next,
 											});
 										}}
-										className={`px-1 rounded border text-[11px] font-mono ${
-							"bg-[var(--syn-bg-input)] border-[var(--syn-border)] text-[var(--syn-warning)]"
-										}`}
+										className={`px-1 rounded border text-[11px] font-mono bg-[var(--syn-bg-input)] border-[var(--syn-border)] text-[var(--syn-warning)]`}
 									>
 										{AGG_FUNCS.map((f) => (
 											<option key={f} value={f}>
@@ -986,9 +985,7 @@ export const AlteryxNode: React.FC<NodeProps<Node<AlteryxNodeData>>> = ({
 											});
 										}}
 										placeholder="Target（* = COUNT(*)）"
-										className={`flex-1 px-1.5 py-0.5 rounded border text-[11px] font-mono ${
-											"bg-[var(--syn-bg-input)] border-[var(--syn-border)] text-[var(--syn-text-primary)]"
-										}`}
+										className={`flex-1 px-1.5 py-0.5 rounded border text-[11px] font-mono bg-[var(--syn-bg-input)] border-[var(--syn-border)] text-[var(--syn-text-primary)]`}
 									/>
 									<button
 										type="button"
@@ -1061,9 +1058,7 @@ export const AlteryxNode: React.FC<NodeProps<Node<AlteryxNodeData>>> = ({
 								onChange={(e) =>
 									updateConfig("joinType", e.target.value)
 								}
-								className={`px-1 rounded border text-[11px] font-mono ${
-									"bg-[var(--syn-bg-input)] border-[var(--syn-border)] text-[var(--syn-warning)]"
-								}`}
+								className={`px-1 rounded border text-[11px] font-mono bg-[var(--syn-bg-input)] border-[var(--syn-border)] text-[var(--syn-warning)]`}
 							>
 								<option value="INNER">INNER</option>
 								<option value="LEFT">LEFT</option>
@@ -1151,9 +1146,7 @@ export const AlteryxNode: React.FC<NodeProps<Node<AlteryxNodeData>>> = ({
 								: "編輯距離 ≤ 門檻";
 					return (
 						<div
-							className={`p-2 rounded border space-y-1 ${
-								"bg-[var(--syn-bg-panel)] border-[var(--syn-border)]"
-							}`}
+							className={`p-2 rounded border space-y-1 bg-[var(--syn-bg-panel)] border-[var(--syn-border)]`}
 						>
 							<div className="text-[9px] font-bold font-mono tracking-wider opacity-60 uppercase">
 								Fuzzy Match Keys
@@ -1391,9 +1384,7 @@ export const AlteryxNode: React.FC<NodeProps<Node<AlteryxNodeData>>> = ({
 					);
 					return (
 						<div
-							className={`p-2 rounded border space-y-1 ${
-								"bg-[var(--syn-bg-panel)] border-[var(--syn-border)]"
-							}`}
+							className={`p-2 rounded border space-y-1 bg-[var(--syn-bg-panel)] border-[var(--syn-border)]`}
 						>
 							<div className="text-[9px] font-bold font-mono tracking-wider opacity-60 uppercase">
 								Spatial Match
@@ -1537,9 +1528,7 @@ export const AlteryxNode: React.FC<NodeProps<Node<AlteryxNodeData>>> = ({
 					const name = safeOutputFileName(config.fileName, fmt);
 					return (
 						<div
-							className={`p-2 rounded border space-y-1 ${
-								"bg-[var(--syn-bg-panel)] border-[var(--syn-border)]"
-							}`}
+							className={`p-2 rounded border space-y-1 bg-[var(--syn-bg-panel)] border-[var(--syn-border)]`}
 						>
 							<div className="text-[9px] font-bold font-mono tracking-wider opacity-60 uppercase">
 								Output
@@ -1569,9 +1558,7 @@ export const AlteryxNode: React.FC<NodeProps<Node<AlteryxNodeData>>> = ({
 								fileName={config.fileName}
 								format={config.outputFormat}
 								columns={upstream.byTable[0] || []}
-								className={`w-full py-1 rounded border text-[10px] font-mono ${
-									"bg-[var(--syn-warning-soft)] border-[var(--syn-warning)] text-[var(--syn-warning)]"
-								} disabled:opacity-40`}
+								className={`w-full py-1 rounded border text-[10px] font-mono bg-[var(--syn-warning-soft)] border-[var(--syn-warning)] text-[var(--syn-warning)] disabled:opacity-40`}
 							/>
 
 							<div className="text-[9px] font-mono opacity-50 leading-tight">
@@ -1606,9 +1593,7 @@ export const AlteryxNode: React.FC<NodeProps<Node<AlteryxNodeData>>> = ({
 							!String(config.assertPredicate ?? "").trim());
 					return (
 						<div
-							className={`p-2 rounded border space-y-1 ${
-								"bg-[var(--syn-bg-panel)] border-[var(--syn-border)]"
-							}`}
+							className={`p-2 rounded border space-y-1 bg-[var(--syn-bg-panel)] border-[var(--syn-border)]`}
 						>
 							<div className="text-[9px] font-bold font-mono tracking-wider opacity-60 uppercase">
 								Assert
@@ -1720,9 +1705,7 @@ export const AlteryxNode: React.FC<NodeProps<Node<AlteryxNodeData>>> = ({
 							value={sortField}
 							onValueChange={(v) => updateConfig("field", v)}
 							placeholder="Sort By (e.g. amount)"
-							className={`w-full px-1.5 py-0.5 rounded border text-[11px] font-mono ${
-								"bg-[var(--syn-bg-input)] border-[var(--syn-border)] text-[var(--syn-text-primary)]"
-							}`}
+							className={`w-full px-1.5 py-0.5 rounded border text-[11px] font-mono bg-[var(--syn-bg-input)] border-[var(--syn-border)] text-[var(--syn-text-primary)]`}
 						/>
 						<MissingFieldWarning
 							field={sortField}
@@ -1756,9 +1739,7 @@ export const AlteryxNode: React.FC<NodeProps<Node<AlteryxNodeData>>> = ({
 							value={(config.columns || []).join(", ")}
 							onChange={(e) => updateColumns(e.target.value)}
 							placeholder="id, name, amount"
-							className={`w-full px-1.5 py-0.5 rounded border text-[11px] font-mono ${
-								"bg-[var(--syn-bg-input)] border-[var(--syn-border)] text-[var(--syn-text-primary)]"
-							}`}
+							className={`w-full px-1.5 py-0.5 rounded border text-[11px] font-mono bg-[var(--syn-bg-input)] border-[var(--syn-border)] text-[var(--syn-text-primary)]`}
 						/>
 						{/* 上游 schema 已知時，點 chip 就能加入 / 移除（仍保留上面的自由輸入） */}
 						{upstream.columns.length > 0 && (
@@ -1806,9 +1787,7 @@ export const AlteryxNode: React.FC<NodeProps<Node<AlteryxNodeData>>> = ({
 							onChange={(e) =>
 								updateConfig("unionMode", e.target.value)
 							}
-							className={`w-full px-1 py-0.5 rounded border text-[11px] font-mono ${
-								"bg-[var(--syn-bg-input)] border-[var(--syn-border)] text-[var(--syn-accent)]"
-							}`}
+							className={`w-full px-1 py-0.5 rounded border text-[11px] font-mono bg-[var(--syn-bg-input)] border-[var(--syn-border)] text-[var(--syn-accent)]`}
 						>
 							<option value="BY_NAME">
 								BY NAME（按欄位名對齊，缺欄補 NULL）
@@ -1847,9 +1826,7 @@ export const AlteryxNode: React.FC<NodeProps<Node<AlteryxNodeData>>> = ({
 								onChange={(e) =>
 									updateConfig("sampleMode", e.target.value)
 								}
-								className={`px-1 rounded border text-[11px] font-mono ${
-									"bg-[var(--syn-bg-input)] border-[var(--syn-border)] text-[var(--syn-accent)]"
-								}`}
+								className={`px-1 rounded border text-[11px] font-mono bg-[var(--syn-bg-input)] border-[var(--syn-border)] text-[var(--syn-accent)]`}
 							>
 								<option value="FIRST">FIRST（前 N 列）</option>
 								<option value="RANDOM">
@@ -1904,9 +1881,7 @@ export const AlteryxNode: React.FC<NodeProps<Node<AlteryxNodeData>>> = ({
 										updateConfigValue({ renames: next });
 									}}
 									placeholder="舊欄位名"
-									className={`flex-1 px-1.5 py-0.5 rounded border text-[11px] font-mono ${
-										"bg-[var(--syn-bg-input)] border-[var(--syn-border)] text-[var(--syn-text-primary)]"
-									}`}
+									className={`flex-1 px-1.5 py-0.5 rounded border text-[11px] font-mono bg-[var(--syn-bg-input)] border-[var(--syn-border)] text-[var(--syn-text-primary)]`}
 								/>
 								<span className="text-[10px] font-mono opacity-50">
 									→
@@ -1922,9 +1897,7 @@ export const AlteryxNode: React.FC<NodeProps<Node<AlteryxNodeData>>> = ({
 										updateConfigValue({ renames: next });
 									}}
 									placeholder="新欄位名"
-									className={`flex-1 px-1.5 py-0.5 rounded border text-[11px] font-mono ${
-										"bg-[var(--syn-bg-input)] border-[var(--syn-border)] text-[var(--syn-accent)]"
-									}`}
+									className={`flex-1 px-1.5 py-0.5 rounded border text-[11px] font-mono bg-[var(--syn-bg-input)] border-[var(--syn-border)] text-[var(--syn-accent)]`}
 								/>
 								<button
 									type="button"
@@ -2643,9 +2616,7 @@ export const AlteryxNode: React.FC<NodeProps<Node<AlteryxNodeData>>> = ({
 				{/* SQL 預覽區塊 */}
 				{showSqlPreview && (
 					<div
-						className={`p-2 rounded font-mono text-[10px] border ${
-							"bg-[var(--syn-bg-code)] text-[var(--syn-text-code)] border-[var(--syn-border)]"
-						}`}
+						className={`p-2 rounded font-mono text-[10px] border bg-[var(--syn-bg-code)] text-[var(--syn-text-code)] border-[var(--syn-border)]`}
 					>
 						<code>{data.sqlQuery}</code>
 					</div>
@@ -2654,9 +2625,7 @@ export const AlteryxNode: React.FC<NodeProps<Node<AlteryxNodeData>>> = ({
 				{/* 執行計畫。只顯示不解析 —— 見 loadPlan 的註解。 */}
 				{showPlan && (
 					<div
-						className={`p-2 rounded font-mono text-[9px] border whitespace-pre overflow-auto max-h-40 ${
-							"bg-[var(--syn-bg-code)] text-[var(--syn-text-code)] border-[var(--syn-border)]"
-						}`}
+						className={`p-2 rounded font-mono text-[9px] border whitespace-pre overflow-auto max-h-40 bg-[var(--syn-bg-code)] text-[var(--syn-text-code)] border-[var(--syn-border)]`}
 					>
 						{planError ? (
 							<span className="text-rose-400">{planError}</span>

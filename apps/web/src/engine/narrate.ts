@@ -31,6 +31,7 @@ import {
 	safeRankMethod,
 	safeMultiFieldOutputMode,
 	safeDistanceUnit,
+	safeHttpUrl,
 } from "./sql";
 
 export interface NarrateInput {
@@ -73,6 +74,17 @@ export function narrateNode(input: NarrateInput): string {
 
 	switch (input.type) {
 		case "INPUT_DUCKDB": {
+			// 遠端來源要講清楚它需要網路 —— 這句話會出現在匯出的腳本裡，
+			// 而那是唯一讀得到它的地方。
+			//
+			// **必須走 safeHttpUrl，不能只看「有沒有填」**：不合法的 URL
+			// （`file://…`）會被編譯器忽略並退回本機路徑，而說明若還說
+			// 「從遠端讀取」，就變成在描述一件程式碼沒做的事 ——
+			// 說明與實際不符，比沒有說明更糟。
+			const url = safeHttpUrl(c.sourceUrl);
+			if (url) {
+				return `從遠端讀取 Parquet：${url}（需要網路與 httpfs 擴充；畫布上讀不到）`;
+			}
 			const file = show(c.fileName, "（未指定檔案）");
 			const table = String(c.tableName ?? "").trim();
 			return table
