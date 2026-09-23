@@ -352,11 +352,32 @@ const CanvasInner: React.FC<NymphCanvasProps> = ({
 
 	useEffect(() => {
 		ikaros.ready
-			.then(() => {
+			.then(async () => {
 				setIsEngineReady(true);
 				setEngineMode(ikaros.mode);
 				if (ikaros.mode === "main-thread" && ikaros.workerError) {
 					setEngineWarning(ikaros.workerError);
+				}
+
+				// 把上次上傳的檔案裝回引擎。
+				//
+				// 沒有這一步的話：工作流還原了、畫布看起來正常，但引擎是空的 ——
+				// 每個 Input 節點都失敗，而使用者完全看不出原因，只能重新上傳，
+				// 而且每次重新載入都要再來一次。
+				try {
+					const { restored, failed } = await ikaros.restorePersistedFiles();
+					if (restored.length > 0 || failed.length > 0) {
+						setNotice({
+							kind: failed.length > 0 ? "error" : "ok",
+							text:
+								`已從本機儲存還原 ${restored.length} 個來源檔` +
+								(failed.length > 0
+									? `，${failed.length} 個失敗（${failed.join("、")}）—— 請重新上傳。`
+									: "，不必重新上傳。"),
+						});
+					}
+				} catch {
+					// OPFS 不可用（無痕模式、舊瀏覽器）不該影響任何功能
 				}
 			})
 			.catch((err: any) => {

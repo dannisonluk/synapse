@@ -8,6 +8,12 @@ import { createCore, dispatch } from "./dispatch";
 import { DEFAULT_MAX_ROWS, type IkarosCore } from "./core";
 // 執行快取的資料版本：每次有新資料進引擎就 +1（見下面的 registerLocalFile）。
 import { dataVersion } from "../cache";
+import {
+	createOpfs,
+	opfsFileName,
+	parseOpfsFile,
+	shouldPersist,
+} from "../opfs";
 
 export type { ColumnInfo, PageResult, FileRegistration } from "./core";
 export { DEFAULT_MAX_ROWS } from "./core";
@@ -330,6 +336,14 @@ class IkarosEngine {
 	): Promise<FileRegistration> {
 		await this.ready;
 		const bytes = await file.arrayBuffer();
+
+		// 先留一份給 OPFS。**順序很重要**：`bytes` 會被 transfer 進 worker
+		// （零拷貝），呼叫 request 之後它已經被 detach、長度變成 0。
+		// 那之後才複製的話會存到一個空檔案，而且不會有任何錯誤。
+		const keep = shouldPersist(bytes.byteLength)
+			? new Uint8Array(bytes.slice(0))
+			: null;
+
 		const res = await this.request(
 			"REGISTER_FILE",
 			{ table: tableName, fileName: file.name, bytes },
@@ -341,10 +355,90 @@ class IkarosEngine {
 		// 每個節點編譯出來的 SQL **一字不變**，但資料變了 —— 少了版本號就會命中
 		// 快取而餵出舊資料，而且不會有任何錯誤訊息。這是快取最危險的失敗形態。
 		dataVersion.bump();
+
+		// 持久化是加分項：失敗不該讓上傳跟著失敗（檔案已經進引擎了）
+		if (keep) void persistUpload(tableName, file.name, keep);
+
 		return {
 			rowCount: Number(res.rowCount ?? 0),
 			columns: res.columns ?? [],
 		};
+	}
+
+	/**
+	 * 把 OPFS 裡的檔案重新註冊進引擎。
+	 *
+	 * 為什麼需要：重新載入頁面之後工作流會還原，但引擎是空的 —— 於是每個
+	 * Input 節點都失敗，而畫布看起來完全正常。使用者只會覺得「檔案不見了」，
+	 * 而且每次重新載入都要重新上傳一次。
+	 *
+	 * 回傳成功與失敗的表名，讓呼叫端能講清楚發生什麼事（而不是安靜地少幾張表）。
+	 */
+	async restorePersistedFiles(): Promise<{
+		restored: string[];
+		failed: string[];
+	}> {
+		await this.ready;
+		const store = await createOpfs();
+		if (!store) return { restored: [], failed: [] };
+
+		const restored: string[] = [];
+		const failed: string[] = [];
+		for (const name of await store.list()) {
+			const entry = parseOpfsFile(name);
+			if (!entry) continue;
+			try {
+				const bytes = await store.read(name);
+				if (!bytes || bytes.length === 0) continue;
+				await this.request(
+					"REGISTER_FILE",
+					{ table: entry.table, fileName: entry.fileName, bytes },
+					[bytes.buffer],
+				);
+				restored.push(entry.table);
+			} catch {
+				failed.push(entry.table);
+			}
+		}
+		// 還原的資料也要讓快取失效 —— 否則第一次執行會沿用「上一輪的鍵」
+		if (restored.length > 0) dataVersion.bump();
+		return { restored, failed };
+	}
+
+	/** 清掉 OPFS 裡的檔案（使用者在 UI 上主動要求時才呼叫） */
+	async clearPersistedFiles(): Promise<number> {
+		const store = await createOpfs();
+		if (!store) return 0;
+		let n = 0;
+		for (const name of await store.list()) {
+			if (!parseOpfsFile(name)) continue;
+			await store.remove(name);
+			n += 1;
+		}
+		return n;
+	}
+}
+
+/**
+ * 把上傳的位元組寫進 OPFS。
+ *
+ * 刻意獨立成函式而不是 client 的方法：它不碰引擎、不碰 worker，
+ * 失敗也只該安靜地放棄（見下面的註解）。
+ */
+async function persistUpload(
+	tableName: string,
+	originalName: string,
+	bytes: Uint8Array,
+): Promise<void> {
+	try {
+		const store = await createOpfs();
+		if (!store) return;
+		const name = opfsFileName(tableName, originalName);
+		if (!name) return;
+		await store.write(name, bytes);
+	} catch {
+		// OPFS 失敗（配額、無痕模式、瀏覽器拒絕）不該影響任何功能。
+		// 檔案已經在引擎裡了，持久化只是「下次不用重傳」的加分項。
 	}
 }
 

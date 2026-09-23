@@ -1775,6 +1775,173 @@ section("2m. 遠端 Parquet（HTTP）");
 }
 
 // ===========================================================================
+// 2n. patchPreview.ts — Hermes patch 的套用前預覽
+// ===========================================================================
+// `resolveAstPatch` 是寬鬆的：未知型別退回 FILTER、幻覺 config 鍵丟掉。
+// 好處是壞 payload 不會讓畫布掛掉，代價是**畫布會安靜地變成別的樣子**。
+// 這個模組的責任就是把那些「安靜的改變」變成看得見的項目。
+const prevMod = await loadTs("apps/web/src/engine/patchPreview.ts");
+section("2n. patchPreview.ts — patch 預覽");
+
+{
+	// 嚴重性的分法不對稱，而那個不對稱是有理由的：
+	//   unknown-type → 節點會變成 FILTER，也就是做一件跟要求**不同**的事
+	//   unknown-key  → 節點仍做對的事，只是少了某個參數
+	const S = (k) => prevMod.issueSeverity(k);
+	check("an unknown node type is an error", S("unknown-type"), "error");
+	check("a malformed payload is an error", S("malformed"), "error");
+	check("an unknown config key is only a warning", S("unknown-key"), "warn");
+	check("a bad enum value is only a warning", S("bad-enum"), "warn");
+	check("a missing required field is only a warning", S("missing-required"), "warn");
+	// 未知的種類不可以靜默變成 info —— 那會讓它從「需要看」變成「不用看」
+	check("an unrecognised issue kind falls back to warn, not info", S("something-new"), "warn");
+}
+
+{
+	const resolved = {
+		nodes: [
+			{ ref: "n0", newNodeId: "node_a", nodeType: "FILTER", flowNodeType: "alteryxNode",
+				label: "Keep Big", config: { field: "amount", op: ">", val: "1000" }, position: { x: 0, y: 0 } },
+		],
+		edges: [{ source: "n0", target: "n1" }, { source: "n0", target: "n1", targetHandle: "false" }],
+		droppedEdges: 0,
+		issues: [],
+	};
+	const p = prevMod.buildPatchPreview(resolved);
+	check("the counts are reported", [p.nodeCount, p.edgeCount], [1, 2]);
+	check("a clean patch can be applied", p.canApply, true);
+	check("every node becomes one line", p.items.filter((i) => i.severity === "info").length, 3);
+	// 節點用 narrateNode 描述 —— 與匯出腳本的註解是同一句話
+	has("the node line uses the same narration as the export",
+		p.items[0].text, "只保留 amount > 1000 的列");
+	has("...and names the label and type", p.items[0].text, "Keep Big");
+	// 邊的兩端用 ref，因為節點 id 是剛生成的
+	has("an edge line names both ends", p.items[1].text, "n0 → n1");
+	has("...and the port when there is one", p.items[2].text, "false 埠");
+	check("a clean preview has no warning", p.items.some((i) => i.severity !== "info"), false);
+}
+
+{
+	// 未知型別 → error → 不該直接套用
+	const p = prevMod.buildPatchPreview({
+		nodes: [{ ref: "n0", newNodeId: "node_a", nodeType: "FILTER", flowNodeType: "alteryxNode",
+			label: "X", config: {}, position: { x: 0, y: 0 } }],
+		edges: [],
+		droppedEdges: 0,
+		issues: [{ nodeIndex: 0, nodeId: "n0", kind: "unknown-type", detail: "JOINX 不在目錄裡" }],
+	});
+	check("an unknown type blocks a clean apply", p.canApply, false);
+	check("...and is reported as an error", p.items.find((i) => i.text.includes("JOINX")).severity, "error");
+	has("...with a human label", p.items.find((i) => i.text.includes("JOINX")).text, "未知節點類型");
+	check("the issue count is reported", p.issueCount, 1);
+}
+
+{
+	// 只有 warning 的話仍然可以套用 —— 那正是分級的用途
+	const p = prevMod.buildPatchPreview({
+		nodes: [],
+		edges: [],
+		droppedEdges: 2,
+		issues: [{ nodeIndex: -1, nodeId: "", kind: "unknown-key", detail: "groupby 不是合法欄位" }],
+	});
+	check("warnings alone do not block the apply", p.canApply, true);
+	check("a dropped edge is a warning, not an error",
+		p.items.find((i) => i.text.includes("丟棄")).severity, "warn");
+	has("...and says how many", p.items.find((i) => i.text.includes("丟棄")).text, "2 條");
+
+	has("the summary line mentions the counts", prevMod.summarizePreview(p), "新增 0 個節點、0 條連線");
+	has("...the dropped edges", prevMod.summarizePreview(p), "丟棄 2 條");
+	has("...and the issues", prevMod.summarizePreview(p), "1 處與節點目錄不符");
+}
+
+{
+	// 空 patch 不該產生任何項目，但仍要是可套用的（不是「有錯」）
+	const p = prevMod.buildPatchPreview({ nodes: [], edges: [], droppedEdges: 0, issues: [] });
+	check("an empty patch has no items", p.items, []);
+	check("...and is still applicable", p.canApply, true);
+	check("...and its summary is still sensible",
+		prevMod.summarizePreview(p), "新增 0 個節點、0 條連線");
+}
+
+// ===========================================================================
+// 2o. opfs.ts — 上傳檔案的持久化
+// ===========================================================================
+// 重新載入之後工作流會還原，但引擎是空的 —— 每個 Input 節點都失敗，而畫布
+// 看起來完全正常。這個模組讓上傳的檔案活過重新載入。
+const opfsMod = await loadTs("apps/web/src/engine/opfs.ts");
+section("2o. opfs.ts — 上傳檔案的持久化");
+
+{
+	check("a small file is worth persisting", opfsMod.shouldPersist(1024), true);
+	check("...and so is one at the limit",
+		opfsMod.shouldPersist(opfsMod.MAX_PERSIST_BYTES), true);
+	// 超過上限就別存：OPFS 的配額是 origin 整體的，塞爆會連自動存檔一起被清掉
+	check("a file over the limit is refused",
+		opfsMod.shouldPersist(opfsMod.MAX_PERSIST_BYTES + 1), false);
+	check("an empty file is refused", opfsMod.shouldPersist(0), false);
+	check("a nonsensical size is refused", opfsMod.shouldPersist(NaN), false);
+	check("the limit is a sane number of megabytes",
+		opfsMod.MAX_PERSIST_BYTES / 1024 / 1024, 64);
+}
+
+{
+	const N = (table, name) => opfsMod.opfsFileName(table, name);
+	check("a CSV keeps its extension", N("src_node_a", "sales.csv"), "synapse-upload-src_node_a.csv");
+	check("a Parquet keeps its extension",
+		N("src_node_a", "sales.parquet"), "synapse-upload-src_node_a.parquet");
+	// 副檔名決定引擎用哪個讀取器：把 Parquet 還原成 .csv 會解析出垃圾
+	check("the extension decides the reader, so it is preserved",
+		N("t", "DATA.PARQUET"), "synapse-upload-t.parquet");
+	check("an unknown extension becomes csv", N("t", "data.txt"), "synapse-upload-t.csv");
+	// 不驗證確切的底線數量（那取決於 sanitise 的實作），而是驗證**性質**：
+	// 產生的檔名裡不可以留下任何路徑分隔或上層目錄符號。
+	{
+		const hostile = N("a/../../etc", "x.csv");
+		check("a hostile table name leaves no path separator", hostile.includes("/"), false);
+		check("...and no parent-directory segment", hostile.includes(".."), false);
+		check("...and keeps the prefix", hostile.startsWith("synapse-upload-"), true);
+	}
+	check("a blank table name yields nothing", N("", "x.csv"), "");
+	// 空表名不可以產生一個「前綴 + .csv」的檔，那會在還原時變成表名為空的檔案
+	check("...and that file name would not parse back", opfsMod.parseOpfsFile("synapse-upload-.csv"), null);
+}
+
+{
+	const P = (name) => opfsMod.parseOpfsFile(name);
+	check("a persisted file parses back", P("synapse-upload-src_node_a.csv"),
+		{ table: "src_node_a", fileName: "src_node_a.csv" });
+	check("...and a parquet one gives the right reader hint",
+		P("synapse-upload-src_node_a.parquet"),
+		{ table: "src_node_a", fileName: "src_node_a.parquet" });
+	// 不是我們的檔案要跳過，否則會把別的用途的檔案餵給引擎
+	check("a foreign file is ignored", P("some-other-app.json"), null);
+	check("a file with no extension is ignored", P("synapse-upload-t"), null);
+	// 副檔名白名單：引擎只認得這兩種
+	check("an unknown extension is ignored", P("synapse-upload-t.xlsx"), null);
+	// 對稱性：解析器只接受寫入器可能產生的名字。
+	// `..%2Fetc` 不可能是 opfsFileName 寫出來的，所以那個檔案不是我們的。
+	check("a name the writer could not have produced is ignored",
+		P("synapse-upload-..%2Fetc.csv"), null);
+	check("...and a name with a space is ignored too",
+		P("synapse-upload-my file.csv"), null);
+	check("a non-string is ignored", P(null), null);
+
+	// 往返：產生的檔名一定要能解析回來，否則還原永遠是空的
+	const round = P(opfsMod.opfsFileName("src_abc", "x.parquet"));
+	check("the name round-trips", round, { table: "src_abc", fileName: "src_abc.parquet" });
+}
+
+{
+	// feature 偵測：無痕模式與舊瀏覽器都沒有 getDirectory
+	check("a browser with OPFS is detected", opfsMod.opfsSupported({ storage: { getDirectory: () => {} } }), true);
+	check("a browser without storage is not", opfsMod.opfsSupported({}), false);
+	check("a browser without navigator.storage is not", opfsMod.opfsSupported({ storage: null }), false);
+	check("a throwing navigator is handled",
+		opfsMod.opfsSupported({ get storage() { throw new Error("nope"); } }), false);
+	check("no navigator at all is handled", opfsMod.opfsSupported(null), false);
+}
+
+// ===========================================================================
 // 3. Hermes patch resolution
 // ===========================================================================
 const patchMod = await loadTs("apps/web/src/engine/patch.ts");
@@ -3761,6 +3928,42 @@ section("11. repo 一致性 — 衍生產物、設定檔、死程式碼");
 		check("...and the dispatch table was actually parsed", called.length >= 8, true);
 		check("...and the deps array was actually found", depsAt > 0, true);
 	}
+
+	// --- 上傳檔案的持久化（OPFS）---
+	{
+		const clientSrc = read("apps/web/src/engine/ikaros/client.ts");
+		// 複製必須發生在 request 之前：bytes 會被 transfer 進 worker（零拷貝），
+		// 之後它已經被 detach、長度是 0 —— 那時才複製會存到一個空檔案，
+		// 而且不會有任何錯誤。
+		const sliceAt = clientSrc.indexOf("new Uint8Array(bytes.slice(0))");
+		const requestAt = clientSrc.indexOf('"REGISTER_FILE"');
+		check("the bytes are copied before they are transferred to the worker",
+			sliceAt > 0 && requestAt > 0 && sliceAt < requestAt, true);
+		has("...and only files within the size limit are kept", clientSrc, "shouldPersist(");
+		has("...and a persistence failure does not fail the upload", clientSrc, "void persistUpload(");
+		// 重新載入後要把檔案裝回引擎，否則畫布正常但每個 Input 都失敗
+		has("the client can restore persisted files", clientSrc, "restorePersistedFiles");
+		has("...using the parser that only accepts writer-produced names",
+			clientSrc, "parseOpfsFile(name)");
+		has("...and bumps the data version so the cache is invalidated",
+			clientSrc, "if (restored.length > 0) dataVersion.bump()");
+		// 呼叫端要把結果講出來 —— 安靜地少幾張表是最糟的結果
+		has("the canvas restores them on startup", canvasSrc, "ikaros.restorePersistedFiles()");
+		has("...and tells the user how many came back", canvasSrc, "已從本機儲存還原");
+	}
+
+	// --- Hermes patch 的套用前預覽 ---
+	has("the patch preview panel is rendered", canvasSrc, "<PatchPreviewPanel");
+	// 收到 patch 時**不可以**直接改畫布 —— 那正是這個功能要修掉的舊行為
+	has("...the patch event only stages a preview, it does not apply",
+		canvasSrc, "setPendingPatch({ resolved, preview: buildPatchPreview(resolved) })");
+	has("...and applying goes through one dedicated callback",
+		canvasSrc, "applyResolvedPatch(pendingPatch.resolved)");
+	// 套用 patch 是一次大幅度變更，必須能 undo
+	has("...and the applied patch is recorded in history so it can be undone",
+		canvasSrc, '"patch:apply"');
+	// 捨棄也要有回饋，否則使用者不知道按了有沒有作用
+	has("...and discarding is reported too", canvasSrc, "已捨棄 Hermes 變更");
 
 	// --- 遠端 Parquet：兩個引擎要對「什麼是合法來源」看法一致 ---
 	{
