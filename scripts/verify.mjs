@@ -9,7 +9,7 @@
 //   3. SQL 編譯器注入防護（值 / 運算子 / 函數 / JOIN 類型 / 表達式）
 //
 // 用法：node scripts/verify.mjs      （在 repo root 執行）
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -21,6 +21,36 @@ const ROOT = resolve(process.cwd());
 const CATALOG_JSON = join(ROOT, "apps", "server", "node_catalog.json");
 let failures = 0;
 let checks = 0;
+
+/**
+ * 這個環境能不能從 Node 起子行程？
+ *
+ * 實測（2026-09-23）：在目前的沙箱設定下，Node 的 spawnSync 對**任何**執行檔
+ * 都回 EBUSY —— 連 `process.execPath`（node 自己）也是 —— 而同一支執行檔從
+ * shell 直接跑完全正常。所以那不是「python 壞了」，是「這個環境不允許 Node
+ * 起子行程」。
+ *
+ * 這種情況必須**跳過**，不可以紅燈：紅燈會讓人以為是程式碼的問題，於是去改
+ * 一個沒壞的東西。它跟「找不到裝了 duckdb 的 python」是同一類的環境限制，
+ * 所以走同一條 SKIP 路徑。
+ *
+ * 用 node 自己當探針，而不是拿 python 去試 —— 這樣才能區分
+ * 「環境不能 spawn」與「python 不存在」這兩件不同的事。
+ */
+const CAN_SPAWN = (() => {
+	try {
+		return !spawnSync(process.execPath, ["-e", "0"], { encoding: "utf8" }).error;
+	} catch {
+		return false;
+	}
+})();
+
+/** 需要子行程的檢查在跳過時印這一行，並說明真正的原因 */
+function skipSpawnNotice(what) {
+	console.log(
+		`  \x1b[33mSKIP\x1b[0m  ${what}：${CAN_SPAWN ? "找不到合適的直譯器" : "此環境不允許從 Node 起子行程（spawn 回 EBUSY）"}`,
+	);
+}
 
 /**
  * 輸出長度上限。**這不是美觀問題，是可用性問題。**
@@ -981,6 +1011,110 @@ section("2g. narrate.ts — 管線說明");
 }
 
 // ===========================================================================
+// 2h. suggest.ts — Join 鍵建議
+// ===========================================================================
+// 假陽性比沒有建議更糟：使用者會照著一條看起來很專業的建議接線，然後結果
+// 少幾列而沒有任何錯誤訊息。所以這裡釘的重點是「什麼**不該**被建議」。
+const sugMod = await loadTs("apps/web/src/engine/suggest.ts");
+section("2h. suggest.ts — Join 鍵建議");
+
+{
+	const N = (s) => sugMod.normaliseColumnName(s);
+	check("a separated key suffix is stripped", N("customer_id"), "customer");
+	check("a glued key suffix is stripped", N("customerid"), "customer");
+	check("case does not matter", N("CustomerID"), "customer");
+	check("underscores and hyphens do not matter", N("customer-id"), "customer");
+	check("a short prefix is NOT stripped (cust is the name, not the noise)",
+		N("cust_id"), "cust");
+	// 門檻的守門：沒有它，valid 會被剝成 val，然後跟一個真的叫 val 的欄位
+	// 變成「完全相同」—— 一個看起來很肯定的假陽性。
+	check("a word that merely ends in a noise token is left alone", N("valid"), "valid");
+	check("...so it cannot become a confident match for 'val'",
+		sugMod.suggestJoinKeys([{ name: "valid", type: "INTEGER" }], [{ name: "val", type: "INTEGER" }])[0].score < 100,
+		true);
+	check("a plain name is unchanged", N("amount"), "amount");
+	check("the bare noise token survives", N("id"), "id");
+	check("a non-key suffix is not stripped", N("product_code") === "product" ? "product" : N("product_code"), "product");
+	check("CJK is preserved", N("客戶編號"), "客戶編號");
+	check("an empty name normalises to empty", N("   "), "");
+	check("null is safe", N(""), "");
+}
+
+{
+	check("INTEGER is numeric", sugMod.isNumericType("INTEGER"), true);
+	check("DECIMAL(10,2) is numeric", sugMod.isNumericType("DECIMAL(10,2)"), true);
+	check("DOUBLE is numeric", sugMod.isNumericType("DOUBLE"), true);
+	check("VARCHAR is not", sugMod.isNumericType("VARCHAR"), false);
+	check("DATE is not", sugMod.isNumericType("DATE"), false);
+	check("an unknown type is not numeric", sugMod.isNumericType(undefined), false);
+}
+
+{
+	const L = [{ name: "customer_id", type: "INTEGER" }, { name: "amount", type: "DECIMAL(10,2)" }];
+	const R = [{ name: "CustomerID", type: "INTEGER" }, { name: "amount", type: "DECIMAL(10,2)" }];
+	const s = sugMod.suggestJoinKeys(L, R, 0);
+	check("an exact normalised match is suggested", s.length, 2);
+	// 拼寫完全相同的排前面：它沒有任何推論成分（+5），而 customer_id =
+	// CustomerID 用了剝後綴與大小寫折疊兩層推論。
+	check("...with the byte-identical pair scoring highest",
+		[s[0].left, s[0].right, s[0].score], ["amount", "amount", 125]);
+	check("...and the suffix-only match scoring lower",
+		[s[1].left, s[1].right, s[1].score], ["customer_id", "CustomerID", 120]);
+	check("the reason names both facts", s[0].reason, "名稱相同・型別相同");
+	check("a confident suggestion is flagged as such", sugMod.isConfidentSuggestion(s[0]), true);
+}
+
+{
+	// 型別不相容要壓下去：把文字接到數值，DuckDB 會嘗試轉型，轉不動的列直接消失
+	const s = sugMod.suggestJoinKeys(
+		[{ name: "order_id", type: "VARCHAR" }],
+		[{ name: "order_id", type: "INTEGER" }],
+	);
+	check("a numeric/string mismatch is penalised below a clean match", s[0].score, 80);
+	check("...and says so", s[0].reason, "名稱相同・型別不相容（數值 vs 文字）");
+	check("...so it is not presented as confident", sugMod.isConfidentSuggestion(s[0]), false);
+
+	// 兩個都是數值但寫法不同（INTEGER vs BIGINT）→ 仍然可以接，只給小加成
+	const n = sugMod.suggestJoinKeys(
+		[{ name: "id", type: "INTEGER" }],
+		[{ name: "id", type: "BIGINT" }],
+	);
+	check("two numeric types get a small bonus", n[0].score, 115);
+	check("...and the reason says both are numeric", n[0].reason, "名稱相同・都是數值");
+}
+
+{
+	// 短名稱的「包含」幾乎沒有資訊量 —— 一個叫 a 的欄位不該match 所有東西
+	check("a one-character name is never suggested by containment",
+		sugMod.suggestJoinKeys([{ name: "a" }], [{ name: "amount" }]), []);
+	check("a two-character name is not either",
+		sugMod.suggestJoinKeys([{ name: "ab" }], [{ name: "abc" }]), []);
+	check("containment works once both sides are long enough",
+		sugMod.suggestJoinKeys([{ name: "customer" }], [{ name: "customername" }])[0].score, 55);
+	// custno 會被剝成 cust —— 那是後綴剝除在正常運作，不是包含關係
+	check("a glued noise suffix collapses to an exact match",
+		sugMod.suggestJoinKeys([{ name: "cust" }], [{ name: "custno" }])[0].score, 100);
+	// 編輯距離刻意不做：amount 與 account 無關，不該拿到分數
+	check("unrelated but similarly spelled names are NOT suggested",
+		sugMod.suggestJoinKeys([{ name: "amount" }], [{ name: "account" }]), []);
+	check("nothing in common returns nothing",
+		sugMod.suggestJoinKeys([{ name: "alpha" }], [{ name: "beta" }]), []);
+	check("an empty side returns nothing", sugMod.suggestJoinKeys([], [{ name: "id" }]), []);
+	check("a blank name is skipped",
+		sugMod.suggestJoinKeys([{ name: "  " }], [{ name: "id" }]), []);
+	check("limit truncates", sugMod.suggestJoinKeys(
+		[{ name: "a1" }, { name: "b1" }, { name: "c1" }],
+		[{ name: "a1" }, { name: "b1" }, { name: "c1" }],
+		2,
+	).length, 2);
+	// 沒有型別資訊時仍然要能建議（describe 失敗、表還沒跑過）
+	check("a suggestion works without type information",
+		sugMod.suggestJoinKeys([{ name: "id" }], [{ name: "id" }])[0].score, 105);
+	check("...and the reason omits the type clause",
+		sugMod.suggestJoinKeys([{ name: "id" }], [{ name: "id" }])[0].reason, "名稱相同");
+}
+
+// ===========================================================================
 // 3. Hermes patch resolution
 // ===========================================================================
 const patchMod = await loadTs("apps/web/src/engine/patch.ts");
@@ -1134,13 +1268,15 @@ check("toFlowEdges marks particleEdge + animated",
 // 4. Hermes backend (Python)
 // ===========================================================================
 section("4. apps/server/hermes.py — context + patch 驗證");
-const py = [
-	join(ROOT, "apps", "server", "venv", "Scripts", "python.exe"),
-	join(ROOT, "apps", "server", "venv", "bin", "python"),
-].find(existsSync);
+const py = CAN_SPAWN
+	? [
+			join(ROOT, "apps", "server", "venv", "Scripts", "python.exe"),
+			join(ROOT, "apps", "server", "venv", "bin", "python"),
+		].find(existsSync)
+	: null;
 
 if (!py) {
-	console.log("  \x1b[33mSKIP\x1b[0m  找不到 apps/server/venv，略過 Python 測試");
+	skipSpawnNotice("apps/server/venv 的 Python 測試");
 } else {
 	try {
 		const out = execFileSync(py, ["scripts/verify_hermes.py"], {
@@ -1347,6 +1483,9 @@ section("6. exporter SQL → 真實 DuckDB 執行");
 
 /** 尋找一個裝了 duckdb 的 python；找不到就跳過（不應因為環境而紅燈） */
 function findDuckdbPython() {
+	// 不能 spawn 就別試了 —— 每一支候選都會回 EBUSY，最後回 null，
+	// 而呼叫端的 SKIP 訊息會說出真正的原因（見 skipSpawnNotice）。
+	if (!CAN_SPAWN) return null;
 	const candidates = [
 		process.env.SYNAPSE_DUCKDB_PYTHON,
 		join(ROOT, "apps", "server", "venv", "Scripts", "python.exe"),
@@ -1370,6 +1509,7 @@ function findDuckdbPython() {
 
 /** 任何一個能跑的 python（不需要任何額外套件） */
 function findPython() {
+	if (!CAN_SPAWN) return null;
 	const candidates = [
 		process.env.SYNAPSE_PYTHON,
 		join(ROOT, "apps", "server", "venv", "Scripts", "python.exe"),
@@ -1400,6 +1540,7 @@ function findPython() {
  * 而且只影響這個驗證工具，所以這裡直接繞過。
  */
 function findPolarsPython() {
+	if (!CAN_SPAWN) return null;
 	const candidates = [
 		process.env.SYNAPSE_POLARS_PYTHON,
 		join(ROOT, "apps", "server", "venv", "Scripts", "python.exe"),
@@ -1426,9 +1567,7 @@ function findPolarsPython() {
 const duckPy = findDuckdbPython();
 
 if (!duckPy) {
-	console.log(
-		"  \x1b[33mSKIP\x1b[0m  找不到裝了 duckdb 的 python（可設 SYNAPSE_DUCKDB_PYTHON 指定）",
-	);
+	skipSpawnNotice("真引擎 SQL 執行（可設 SYNAPSE_DUCKDB_PYTHON 指定直譯器）");
 } else {
 	// 真實工作流：raw_data → FILTER → FORMULA → SUMMARIZE → VIZ_CHART
 	const RUNTIME_NODES = [
@@ -1530,7 +1669,7 @@ section("7. 真實 duckdb-wasm 引擎 — SQL 語意");
 			);
 		}
 	} else {
-		console.log("  \x1b[33mSKIP\x1b[0m  沒有 python，跳過 fallback 端到端執行");
+		console.log("  \x1b[33mSKIP\x1b[0m  沒有可用的 python，跳過 fallback 端到端執行");
 	}
 
 	const wasmChecks = await runDuckDbWasmChecks(ROOT, loadTs, fallbackPipelines);
@@ -2919,6 +3058,21 @@ section("11. repo 一致性 — 衍生產物、設定檔、死程式碼");
 	// 反向：這些關鍵呼叫點若被刪掉，上面的斷言會紅；但也要確認掃描不是空的。
 	check("the wiring scan read a non-trivial file", canvasSrc.length > 10000, true);
 	check("the drawer wiring scan read a non-trivial file", drawerSrc.length > 10000, true);
+
+	// --- Join 鍵建議 ---
+	{
+		const nodeSrc = read("apps/web/src/components/nymph/nodes/AlteryxNode.tsx");
+		has("the JOIN form offers a key suggestion", nodeSrc, "suggestJoinKeys(left, right, 1)");
+		// 兩個鍵必須在**同一次** updateConfigValue 裡設定。分兩次呼叫
+		// updateConfig 會踩 stale closure：第二次讀到的 config 還是舊的，
+		// 於是把第一次寫進去的 leftKey 蓋掉 —— 兩個欄位只會生效一個。
+		const block = nodeSrc.slice(nodeSrc.indexOf("suggestJoinKeys(left, right, 1)"));
+		has("...applying the left key", block.slice(0, 900), "leftKey: top.left,");
+		has("...and the right key in the SAME config object", block.slice(0, 900), "rightKey: top.right,");
+		// 兩個節點都要有（JOIN 與 FUZZY_JOIN 共用同一份推導）
+		check("both join nodes offer it",
+			nodeSrc.split("suggestJoinKeys(left, right, 1)").length - 1, 2);
+	}
 
 	// --- 執行計畫（EXPLAIN）---
 	{
