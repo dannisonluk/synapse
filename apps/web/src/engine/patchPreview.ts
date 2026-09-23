@@ -68,8 +68,15 @@ export function issueSeverity(kind: string): PreviewSeverity {
  *
  * 節點用 `narrateNode` 描述 —— 與匯出腳本裡的註解是同一句話，所以
  * 「AI 說要做的」「畫布上真的做的」「匯出後會做的」三者用同一套語言表達。
+ *
+ * @param extra 額外的項目（例如 SQL 匯入時「認不出來所以沒進圖」的語句）。
+ *   放進來而不是另開一個清單，是為了讓**一個面板**講完整件事 ——
+ *   分成兩個地方顯示時，使用者只會看到其中一個。
  */
-export function buildPatchPreview(resolved: ResolutionResult): PatchPreview {
+export function buildPatchPreview(
+	resolved: ResolutionResult,
+	extra: PatchPreviewItem[] = [],
+): PatchPreview {
 	const items: PatchPreviewItem[] = [];
 
 	for (const n of resolved.nodes) {
@@ -107,11 +114,13 @@ export function buildPatchPreview(resolved: ResolutionResult): PatchPreview {
 		});
 	}
 
+	items.push(...extra);
+
 	return {
 		nodeCount: resolved.nodes.length,
 		edgeCount: resolved.edges.length,
 		droppedEdges: resolved.droppedEdges,
-		issueCount: resolved.issues.length,
+		issueCount: resolved.issues.length + extra.filter((e) => e.severity !== "info").length,
 		items,
 		canApply: items.every((i) => i.severity !== "error"),
 	};

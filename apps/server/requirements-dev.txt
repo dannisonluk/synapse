@@ -14,3 +14,7 @@
 #   時都帶上 POLARS_SKIP_CPU_CHECK=1（見 findPolarsPython 的註解）。
 duckdb>=1.1.0
 polars>=1.0.0
+
+# SQL → AST 匯入（apps/server/sql_import.py）需要。
+# 沒有它，scripts/verify.mjs 的 SQL 匯入自我測試會 SKIP。
+sqlglot>=20.0.0

@@ -44,6 +44,10 @@ import { VizChartNode } from "./nodes/VizChartNode";
 import { withNodeBoundary } from "../ErrorBoundary";
 import { CommandPalette } from "../workbench/CommandPalette";
 import { PatchPreviewPanel } from "../workbench/PatchPreviewPanel";
+import {
+	SqlImportPanel,
+	type SqlImportResult,
+} from "../workbench/SqlImportPanel";
 // 命令面板的候選直接來自目錄 —— 它本來就是「有哪些節點」的唯一真相。
 import { NODE_CATALOG, defaultConfigFor } from "../../engine/nodeCatalog";
 import { ikaros } from "../../engine/ikaros/client";
@@ -1441,6 +1445,7 @@ const CanvasInner: React.FC<NymphCanvasProps> = ({
 			{ id: "export-python", label: "匯出 Python（Polars）", hint: ".py", keywords: "export python polars 匯出" },
 			{ id: "export-dbt", label: "匯出 dbt 專案", hint: "models + tests", keywords: "export dbt models tests 匯出" },
 			{ id: "export-db", label: "匯出資料庫載入腳本", hint: "Postgres", keywords: "export database postgres copy 匯出 資料庫 寫入" },
+			{ id: "import-sql", label: "匯入 SQL", hint: "sqlglot", keywords: "import sql 匯入 貼上 反向" },
 			{ id: "save", label: "儲存工作流", hint: "JSON", keywords: "save 儲存 存檔" },
 			{ id: "share", label: "複製分享連結", hint: "URL", keywords: "share link 分享 連結 網址" },
 			{ id: "load", label: "載入工作流", hint: "JSON", keywords: "load import open 載入 開啟" },
@@ -1523,6 +1528,8 @@ const CanvasInner: React.FC<NymphCanvasProps> = ({
 					return handleExportDbt();
 				case "export-db":
 					return handleExportDb();
+				case "import-sql":
+					return setSqlImportOpen(true);
 				case "save":
 					return handleSaveWorkflow();
 				case "share":
@@ -1687,6 +1694,41 @@ const CanvasInner: React.FC<NymphCanvasProps> = ({
 		return () =>
 			window.removeEventListener("SYNAPSE_AST_PATCH", handleAstPatch);
 	}, [nodes]);
+
+	/** SQL 匯入面板的開關 */
+	const [sqlImportOpen, setSqlImportOpen] = useState(false);
+
+	/**
+	 * SQL 匯入的結果 → **走與 Hermes 完全相同的預覽流程**。
+	 *
+	 * 這是刻意的：兩種來源（人寫的 SQL、AI 產生的 patch）用同一套信任機制，
+	 * 而不是兩套。轉不出來的語句也一起進預覽，讓使用者在同一個地方看到全貌。
+	 */
+	const handleSqlImported = useCallback((result: SqlImportResult) => {
+		const patch = result.patch ?? {};
+		if (!Array.isArray(patch.nodes) || patch.nodes.length === 0) {
+			setNotice({
+				kind: "error",
+				text: result.notes.join("　") || "這段 SQL 沒有轉換出任何節點。",
+			});
+			return;
+		}
+		const resolved = resolveAstPatch(
+			patch,
+			nodesRef.current.map((n) => n.id),
+			generateNodeId,
+		);
+		// 「認不出來所以沒進圖」的語句用 error 級別 —— 它們**不在**這張圖裡，
+		// 使用者必須知道，否則會以為整段 SQL 都轉過去了。
+		const extras = [
+			...result.notes.map((t) => ({ severity: "warn" as const, text: t })),
+			...result.unhandled.map((t) => ({
+				severity: "error" as const,
+				text: "未轉換：" + t,
+			})),
+		];
+		setPendingPatch({ resolved, preview: buildPatchPreview(resolved, extras) });
+	}, []);
 
 	const handleApplyPendingPatch = useCallback(() => {
 		if (!pendingPatch) return;
@@ -2059,6 +2101,12 @@ const CanvasInner: React.FC<NymphCanvasProps> = ({
 					}}
 				/>
 			</ReactFlow>
+
+			<SqlImportPanel
+				open={sqlImportOpen}
+				onClose={() => setSqlImportOpen(false)}
+				onImported={handleSqlImported}
+			/>
 
 			{/* Hermes patch 的套用前預覽。收到 patch 時**不直接套用** —— 未知型別會
 			    退化成 FILTER、幻覺 config 鍵會被丟掉，那些都必須先看到。 */}

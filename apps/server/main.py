@@ -35,3 +35,35 @@ async def fix_sql(req: ChaosFixRequest):
 
 from hermes import router as hermes_router
 app.include_router(hermes_router)
+
+
+# ---------------------------------------------------------------------------
+# SQL → AST patch
+# ---------------------------------------------------------------------------
+# 放在後端而不是前端：解析要 sqlglot，而那是 Python 套件。
+#
+# 為什麼不叫 LLM 做：這是一個**語法**問題（「這是不是 GROUP BY」），
+# sqlglot 給的是確定的答案；LLM 會給出看起來合理但不存在的節點。
+# 同一條理由已經寫在 hermes 的註解裡，這裡再套用一次。
+from sql_import import convert as convert_sql
+
+
+class SqlImportRequest(BaseModel):
+    sql: str
+
+
+@app.post("/api/v1/sql/import")
+async def import_sql(req: SqlImportRequest):
+    """
+    把一段 SQL 轉成 AST patch。
+
+    回傳 `{patch, notes, unhandled}`。**`unhandled` 是重點**：認不出來的
+    語句會被列出來，而不是被硬塞一個節點型別 —— 猜錯的結果是一張看起來對、
+    跑起來錯的圖。
+    """
+    try:
+        result = convert_sql(req.sql)
+        return {"status": "SUCCESS", **result}
+    except Exception as e:
+        print(f"❌ SQL Import Error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))

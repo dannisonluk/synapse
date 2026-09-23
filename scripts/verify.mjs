@@ -2121,6 +2121,33 @@ if (!py) {
 		console.log("  \x1b[31mFAIL\x1b[0m  hermes 測試執行失敗");
 		console.log(String(err.stdout || err.message).split("\n").map((l) => "        " + l).join("\n"));
 	}
+
+	// SQL → AST 的轉換（apps/server/sql_import.py）。需要 sqlglot。
+	//
+	// 它的斷言與 hermes 一樣用 PASS/FAIL 行輸出，所以計數方式相同。
+	// 缺少 sqlglot 時它會回 exit code 2 並印訊息，這裡當作 SKIP 而不是失敗 ——
+	// 「這個環境沒裝套件」不是產品的問題。
+	try {
+		const out = execFileSync(py, ["apps/server/sql_import.py", "--self-test"], {
+			cwd: ROOT, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"],
+		});
+		console.log(out.trimEnd().split("\n").map((l) => "  " + l).join("\n"));
+		const pass = (out.match(/^PASS /gm) ?? []).length;
+		const fail = (out.match(/^FAIL /gm) ?? []).length;
+		checks += pass + fail;
+		failures += fail;
+	} catch (err) {
+		const text = String(err.stdout || "") + String(err.stderr || err.message);
+		if (/ModuleNotFoundError|缺少 sqlglot/.test(text)) {
+			console.log(
+				"  \x1b[33mSKIP\x1b[0m  SQL 匯入的自我測試：沒有 sqlglot（python -m pip install sqlglot）",
+			);
+		} else {
+			failures++;
+			console.log("  \x1b[31mFAIL\x1b[0m  SQL 匯入測試執行失敗");
+			console.log(text.split("\n").map((l) => "        " + l).join("\n"));
+		}
+	}
 }
 
 // ===========================================================================
@@ -3927,6 +3954,26 @@ section("11. repo 一致性 — 衍生產物、設定檔、死程式碼");
 		// 反向：確認真的解析到了東西，否則上面那條會空過
 		check("...and the dispatch table was actually parsed", called.length >= 8, true);
 		check("...and the deps array was actually found", depsAt > 0, true);
+	}
+
+	// --- SQL 匯入 ---
+	{
+		const panelSrc = read("apps/web/src/components/workbench/SqlImportPanel.tsx");
+		const serverSrc = read("apps/server/main.py");
+		has("the canvas renders the SQL import panel", canvasSrc, "<SqlImportPanel");
+		// 兩種來源（人寫的 SQL、AI 產生的 patch）用**同一套**預覽與套用流程
+		has("...and its result goes through the same preview as a Hermes patch",
+			canvasSrc, "buildPatchPreview(resolved, extras)");
+		// 認不出來的語句是 error 級 —— 它們不在這張圖裡，使用者必須知道
+		has("...unconverted statements are reported as errors, not silently dropped",
+			canvasSrc, '"未轉換：" + t');
+		has("...and the import is reachable from the palette", canvasSrc, 'case "import-sql":');
+		// 解析在後端（需要 sqlglot）
+		has("the backend exposes an import endpoint", serverSrc, '"/api/v1/sql/import"');
+		has("...and it calls the converter", serverSrc, "convert_sql(req.sql)");
+		// 前端要能分辨「連不上」與「SQL 有錯」—— 否則使用者會一直改沒問題的 SQL
+		has("the panel distinguishes a dead backend from a bad query",
+			panelSrc, "後端沒有回應");
 	}
 
 	// --- 上傳檔案的持久化（OPFS）---
