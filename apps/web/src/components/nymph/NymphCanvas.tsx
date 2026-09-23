@@ -43,6 +43,7 @@ import { AlteryxNode } from "./nodes/AlteryxNode";
 import { VizChartNode } from "./nodes/VizChartNode";
 import { withNodeBoundary } from "../ErrorBoundary";
 import { CommandPalette } from "../workbench/CommandPalette";
+import { PatchPreviewPanel } from "../workbench/PatchPreviewPanel";
 // 命令面板的候選直接來自目錄 —— 它本來就是「有哪些節點」的唯一真相。
 import { NODE_CATALOG, defaultConfigFor } from "../../engine/nodeCatalog";
 import { ikaros } from "../../engine/ikaros/client";
@@ -78,6 +79,11 @@ import {
 } from "../../engine/shareLink";
 import { getLayoutedElements } from "../../engine/autoLayout";
 import { resolveAstPatch, toFlowEdges } from "../../engine/patch";
+import {
+	buildPatchPreview,
+	summarizePreview,
+	type PatchPreview,
+} from "../../engine/patchPreview";
 import {
 	getAncestorClosure,
 	sortSubgraphTopologically,
@@ -1554,18 +1560,15 @@ const CanvasInner: React.FC<NymphCanvasProps> = ({
 	// ---------------------------------------------------------------------
 	// Hermes AST patch → 畫布節點
 	// ---------------------------------------------------------------------
-	useEffect(() => {
-		const handleAstPatch = (e: any) => {
-			const patch = e?.detail;
-			if (!patch?.nodes?.length) return;
-
-			// 映射邏輯抽去 engine/patch.ts（純函數，有獨立測試守住）
-			const resolved = resolveAstPatch(
-				patch,
-				nodes.map((n) => n.id),
-				generateNodeId,
-			);
-
+	/**
+	 * 把已解析的 patch 套到畫布上。
+	 *
+	 * 抽成獨立 callback 是因為它現在有**兩個**入口：使用者按下預覽面板的「套用」。
+	 * 以前是收到事件就直接套 —— 於是壞 payload 會安靜地改變畫布，而使用者
+	 * 只看到節點出現了，看不出其中有東西被改寫。
+	 */
+	const applyResolvedPatch = useCallback(
+		(resolved: ReturnType<typeof resolveAstPatch>) => {
 			const newNodes: Node[] = resolved.nodes.map((rn) => {
 				const compiled = generateSqlFromConfig(
 					rn.newNodeId,
@@ -1601,20 +1604,6 @@ const CanvasInner: React.FC<NymphCanvasProps> = ({
 				);
 			}
 
-			// 後端給了目錄以外的東西（未知型別、幻覺 config 鍵、非法 enum 值…）。
-			// resolveAstPatch 已經把它擋下來了，所以畫布不會壞；但這件事本身必須
-			// 講出來 —— 靜默退化正是「看起來有動、其實做錯事」的來源。
-			if (resolved.issues.length > 0) {
-				const shown = resolved.issues.slice(0, 3).map((i) => i.detail).join("；");
-				const rest =
-					resolved.issues.length > 3 ? `（另有 ${resolved.issues.length - 3} 項）` : "";
-				console.warn("[Hermes] payload 不符節點目錄：", resolved.issues);
-				setNotice({
-					kind: "error",
-					text: `Hermes payload 有 ${resolved.issues.length} 處不符節點目錄：${shown}${rest}`,
-				});
-			}
-
 			// 一次性更新：不可在 setNodes 的 updater 內再 call setEdges
 			// （StrictMode 會重複執行 updater → 重複邊線）
 			const mergedNodes = recompileDownstreamNodes(
@@ -1628,27 +1617,74 @@ const CanvasInner: React.FC<NymphCanvasProps> = ({
 				"LR",
 			);
 
+			// 套用 patch 是一次大幅度的變更，一定要能 undo ——
+			// 否則「AI 改壞了」的唯一補救是重拉整張圖。
+			recordHistory({ nodes: layouted, edges: mergedEdges }, "patch:apply");
 			setEdges(mergedEdges);
 			setNodes(layouted);
 
 			setTimeout(() => {
 				fitView({ duration: 600, padding: 0.2 });
 			}, 100);
+		},
+		[
+			nodes,
+			edges,
+			setNodes,
+			setEdges,
+			fitView,
+			executeNodeQuery,
+			handleNodeConfigChange,
+			recompileDownstreamNodes,
+			recordHistory,
+		],
+	);
+
+	/** 待確認的 patch（有值 = 預覽面板開著） */
+	const [pendingPatch, setPendingPatch] = useState<{
+		resolved: ReturnType<typeof resolveAstPatch>;
+		preview: PatchPreview;
+	} | null>(null);
+
+	useEffect(() => {
+		const handleAstPatch = (e: any) => {
+			const patch = e?.detail;
+			if (!patch?.nodes?.length) return;
+
+			// 映射邏輯抽去 engine/patch.ts（純函數，有獨立測試守住）
+			const resolved = resolveAstPatch(
+				patch,
+				nodes.map((n) => n.id),
+				generateNodeId,
+			);
+			// **先預覽，不直接套用。** 未知型別會退化成 FILTER、幻覺 config 鍵會被
+			// 丟掉 —— 那些都是「安靜地變成別的東西」，使用者必須先看到。
+			setPendingPatch({ resolved, preview: buildPatchPreview(resolved) });
 		};
 
 		window.addEventListener("SYNAPSE_AST_PATCH", handleAstPatch);
 		return () =>
 			window.removeEventListener("SYNAPSE_AST_PATCH", handleAstPatch);
-	}, [
-		nodes,
-		edges,
-		setNodes,
-		setEdges,
-		fitView,
-		executeNodeQuery,
-		handleNodeConfigChange,
-		recompileDownstreamNodes,
-	]);
+	}, [nodes]);
+
+	const handleApplyPendingPatch = useCallback(() => {
+		if (!pendingPatch) return;
+		applyResolvedPatch(pendingPatch.resolved);
+		setNotice({
+			kind: pendingPatch.preview.canApply ? "ok" : "error",
+			text: `已套用 Hermes 變更：${summarizePreview(pendingPatch.preview)}`,
+		});
+		setPendingPatch(null);
+	}, [pendingPatch, applyResolvedPatch]);
+
+	const handleDiscardPendingPatch = useCallback(() => {
+		if (!pendingPatch) return;
+		setNotice({
+			kind: "ok",
+			text: `已捨棄 Hermes 變更（${summarizePreview(pendingPatch.preview)}）`,
+		});
+		setPendingPatch(null);
+	}, [pendingPatch]);
 
 	return (
 		<div
@@ -2002,6 +2038,15 @@ const CanvasInner: React.FC<NymphCanvasProps> = ({
 					}}
 				/>
 			</ReactFlow>
+
+			{/* Hermes patch 的套用前預覽。收到 patch 時**不直接套用** —— 未知型別會
+			    退化成 FILTER、幻覺 config 鍵會被丟掉，那些都必須先看到。 */}
+			<PatchPreviewPanel
+				open={pendingPatch !== null}
+				preview={pendingPatch?.preview ?? null}
+				onApply={handleApplyPendingPatch}
+				onDiscard={handleDiscardPendingPatch}
+			/>
 
 			{/* 命令面板。histVersion 只為了讓 canUndo / canRedo 的變化觸發重繪 */}
 			<CommandPalette
