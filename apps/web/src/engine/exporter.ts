@@ -24,6 +24,14 @@ import { narrateNode } from "./narrate";
 export interface SqlExportResult {
 	/** 可直接貼到 DuckDB / CLI 執行的完整 SQL */
 	sql: string;
+	/**
+	 * 只有 `WITH … SELECT` 那一段，不含檔頭註解與 `LOAD`。
+	 *
+	 * 需要它的地方是「把整條管線當成子查詢」——例如
+	 * `CREATE TABLE out.t AS <query>`（寫入外部資料庫）。用 `sql` 會把
+	 * `LOAD spatial;` 一起塞進去，而那不是合法的子查詢。
+	 */
+	query: string;
 	/** 不由工作流產生的來源表（執行前要自行註冊，例如 raw_data、上傳檔案） */
 	externalSources: string[];
 	/** 被略過的節點 id（VIZ_CHART 是終端檢視節點，不建立資料表） */
@@ -177,6 +185,7 @@ export function exportToSqlCte(
 		lines.push("SELECT 1 AS empty_workflow;");
 		return {
 			sql: lines.join("\n"),
+			query: "SELECT 1 AS empty_workflow",
 			externalSources: [...externalSources].sort(),
 			skipped,
 		};
@@ -189,6 +198,10 @@ export function exportToSqlCte(
 	}
 	if (extensions.size > 0) lines.push("");
 
+	// 從這裡開始是**單一查詢**（WITH … SELECT），前面那些獨立語句都不屬於它。
+	// 記下起點，讓 query 可以單獨使用 —— `CREATE TABLE x AS <query>` 正是
+	// 需要這個形狀，而它不能包含 LOAD 或註解。
+	const queryStart = lines.length;
 	lines.push("WITH");
 	ctes.forEach((cte, i) => {
 		const comma = i < ctes.length - 1 ? "," : "";
@@ -207,6 +220,9 @@ export function exportToSqlCte(
 
 	return {
 		sql: lines.join("\n"),
+		// 只有 WITH … SELECT 那一段，不含檔頭註解與 LOAD。
+		// 尾端分號去掉：它會被嵌進 `CREATE TABLE … AS <query>;`。
+		query: lines.slice(queryStart).join("\n").replace(/;\s*$/, ""),
 		externalSources: [...externalSources].sort(),
 		skipped,
 	};

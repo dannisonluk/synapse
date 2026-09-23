@@ -35,6 +35,7 @@ import {
 	Redo2,
 	Command,
 	Share2,
+	Database,
 } from "lucide-react";
 import { SqlNode } from "./nodes/SqlNode";
 import { ParticleEdge } from "./edges/ParticleEdge";
@@ -59,6 +60,7 @@ import {
 } from "../../engine/exporter";
 import { exportToPolars } from "../../engine/exportPolars";
 import { exportToDbt, projectToText } from "../../engine/exportDbt";
+import { buildDbLoadScript, scriptToText } from "../../engine/exportDb";
 import { downloadText } from "../../lib/download";
 import {
 	NodeKeyBook,
@@ -1056,6 +1058,40 @@ const CanvasInner: React.FC<NymphCanvasProps> = ({
 		});
 	}, [nodes, edges]);
 
+	/**
+	 * 匯出「寫入外部資料庫」的腳本。
+	 *
+	 * **只產生語句，不執行** —— DuckDB-WASM 沒有網路，`INSTALL` 也是 no-op，
+	 * 所以瀏覽器裡連不到外部 DB。那不是「還沒做」，是做不到。
+	 *
+	 * 連線字串一律是佔位值：節點設定會被寫進工作流存檔與分享連結，
+	 * 憑證一旦進設定就會跟著檔案傳出去。填帳密是使用者在自己的檔案裡做的事。
+	 */
+	const handleExportDb = useCallback(() => {
+		const cte = exportToSqlCte(nodes, edges);
+		if (!cte) {
+			setNotice({
+				kind: "error",
+				text: "圖含循環依賴（cycle），無法線性化成 SQL。",
+			});
+			return;
+		}
+		const script = buildDbLoadScript(cte.query, {
+			dialect: "postgres",
+			schema: "public",
+			table: "synapse_output",
+		});
+		if (script.statements.length === 0) {
+			setNotice({ kind: "error", text: script.notes.join("　") });
+			return;
+		}
+		downloadText("synapse-to-database.sql", scriptToText(script), "text/sql");
+		setNotice({
+			kind: "ok",
+			text: "已匯出資料庫載入腳本（Postgres，表名 synapse_output）。連線字串是佔位值 —— 填上帳密後那份檔案請自行保管。",
+		});
+	}, [nodes, edges]);
+
 	// ---------------------------------------------------------------------
 	// 自動存檔（autosave）
 	//
@@ -1377,6 +1413,7 @@ const CanvasInner: React.FC<NymphCanvasProps> = ({
 			{ id: "export-sql", label: "匯出 SQL", hint: "CTE", keywords: "export sql 匯出 下載" },
 			{ id: "export-python", label: "匯出 Python（Polars）", hint: ".py", keywords: "export python polars 匯出" },
 			{ id: "export-dbt", label: "匯出 dbt 專案", hint: "models + tests", keywords: "export dbt models tests 匯出" },
+			{ id: "export-db", label: "匯出資料庫載入腳本", hint: "Postgres", keywords: "export database postgres copy 匯出 資料庫 寫入" },
 			{ id: "save", label: "儲存工作流", hint: "JSON", keywords: "save 儲存 存檔" },
 			{ id: "share", label: "複製分享連結", hint: "URL", keywords: "share link 分享 連結 網址" },
 			{ id: "load", label: "載入工作流", hint: "JSON", keywords: "load import open 載入 開啟" },
@@ -1457,6 +1494,8 @@ const CanvasInner: React.FC<NymphCanvasProps> = ({
 					return handleExportPython();
 				case "export-dbt":
 					return handleExportDbt();
+				case "export-db":
+					return handleExportDb();
 				case "save":
 					return handleSaveWorkflow();
 				case "share":
@@ -1479,6 +1518,9 @@ const CanvasInner: React.FC<NymphCanvasProps> = ({
 			handleRedo,
 			handleExportSql,
 			handleExportPython,
+			handleExportDbt,
+			handleExportDb,
+			handleShareLink,
 			handleSaveWorkflow,
 			handleLoadWorkflow,
 			handleNewWorkflow,
@@ -1792,6 +1834,23 @@ const CanvasInner: React.FC<NymphCanvasProps> = ({
 						style={{ color: tokens.accent }}
 					/>
 					<span>Export dbt</span>
+				</button>
+
+				<button
+					onClick={handleExportDb}
+					title="產生寫入外部資料庫的 SQL（只產生語句 —— 瀏覽器沒有網路，連不到 DB）"
+					style={{
+						backgroundColor: tokens.bgCard,
+						borderColor: tokens.border,
+						color: tokens.textPrimary,
+					}}
+					className="flex items-center space-x-1.5 border text-xs px-3 py-1.5 rounded-lg shadow-sm hover:opacity-80 transition-all font-medium"
+				>
+					<Database
+						className="w-3.5 h-3.5"
+						style={{ color: tokens.accent }}
+					/>
+					<span>Export DB</span>
 				</button>
 
 				<button
